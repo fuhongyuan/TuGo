@@ -195,6 +195,26 @@ const openAiMessages = (messages: RuntimeMessage[], attachments: ModelRequest['a
   ] }
   return { role: message.role, content: message.content }
 })
+const normalizeSchema = (schema: JsonObject): JsonObject => {
+  const out: JsonObject = { ...schema }
+  // Gemini requires an explicit `type` on every property that has an `enum`.
+  // OpenAI tolerates the omission, but being explicit costs nothing.
+  if (Array.isArray(out.enum) && !out.type) out.type = 'string'
+  // `const` is not understood by Gemini; normalise to a single-value enum.
+  if ('const' in out && !Array.isArray(out.enum)) { const constVal = out.const; delete out.const; out.type = out.type || 'string'; out.enum = [constVal] }
+  if (out.properties && typeof out.properties === 'object' && !Array.isArray(out.properties)) {
+    const props: JsonObject = {}
+    for (const [key, value] of Object.entries(out.properties as Record<string, unknown>)) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) props[key] = normalizeSchema(value as JsonObject)
+      else props[key] = value as any
+    }
+    out.properties = props
+  }
+  if (out.items && typeof out.items === 'object' && !Array.isArray(out.items)) out.items = normalizeSchema(out.items as JsonObject)
+  return out
+}
+const normalizeTools = (tools: ToolDefinition[]) => tools.map(tool => ({ ...tool, inputSchema: normalizeSchema(tool.inputSchema) }))
+
 const openAiTools = (tools: ToolDefinition[]) => tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } }))
 const toolMarkerIndex = (text: string, tools: ToolDefinition[]) => {
   const indexes = [text.indexOf('<tool_call>')]
@@ -218,7 +238,7 @@ class OpenAiChatAdapter implements ProviderAdapter {
     // Authorization header (if configured) still takes precedence below.
     const apiKey = String(extra.api_key || '')
     const headers = { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), ...asObject(extra.headers) as Record<string, string> }
-    const body = JSON.stringify({ model: request.model.model, messages: openAiMessages(request.messages, request.attachments), ...(request.tools.length ? { tools: openAiTools(request.tools), tool_choice: toolChoice, parallel_tool_calls: false } : {}), stream: !nonStreamingTools, ...(!nonStreamingTools ? { stream_options: { include_usage: true } } : {}), max_tokens: request.maxOutputTokens, ...(asObject(extra.request_options)) })
+    const body = JSON.stringify({ model: request.model.model, messages: openAiMessages(request.messages, request.attachments), ...(request.tools.length ? { tools: openAiTools(normalizeTools(request.tools)), tool_choice: toolChoice, parallel_tool_calls: false } : {}), stream: !nonStreamingTools, ...(!nonStreamingTools ? { stream_options: { include_usage: true } } : {}), max_tokens: request.maxOutputTokens, ...(asObject(extra.request_options)) })
     debugRequest(request, url, { headers, body }); const response = await fetch(url, { method: 'POST', signal: request.signal, headers, body }); const responseFrames: JsonObject[] = []; const frameDebug = debugResponse(request, response, responseFrames)
     if (!response.ok) await throwHttp(response, request.onDebug)
     if (nonStreamingTools) {
@@ -306,7 +326,7 @@ class OpenAiResponsesAdapter implements ProviderAdapter {
     })
     const apiKey = String(extra.api_key || '')
     const headers = { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), ...asObject(extra.headers) as Record<string, string> }
-    const body = JSON.stringify({ model: request.model.model, input, stream: true, max_output_tokens: request.maxOutputTokens, tools: request.tools.map(tool => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.inputSchema, strict: false })), ...(asObject(extra.request_options)) })
+    const body = JSON.stringify({ model: request.model.model, input, stream: true, max_output_tokens: request.maxOutputTokens, tools: normalizeTools(request.tools).map(tool => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.inputSchema, strict: false })), ...(asObject(extra.request_options)) })
     debugRequest(request, url, { headers, body }); const response = await fetch(url, { method: 'POST', signal: request.signal, headers, body }); const responseFrames: JsonObject[] = []; const frameDebug = debugResponse(request, response, responseFrames)
     if (!response.ok) await throwHttp(response, request.onDebug)
     const calls = new Map<string, { id: string; name: string; arguments: string }>(); const replayItems = new Map<string, JsonObject>()
@@ -345,7 +365,7 @@ class AnthropicAdapter implements ProviderAdapter {
     })
     const defaultPath = base.endsWith('/v1') ? '/messages' : '/v1/messages'
     const url = `${base}${configuredPath(extra, defaultPath)}`; const headers = { 'Content-Type': 'application/json', 'x-api-key': String(extra.api_key || ''), 'anthropic-version': String(extra.anthropic_version || '2023-06-01'), ...asObject(extra.headers) as Record<string, string> }
-    const body = JSON.stringify({ model: request.model.model, system: systems, messages, max_tokens: request.maxOutputTokens, stream: true, tools: request.tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })), ...asObject(extra.request_options) })
+    const body = JSON.stringify({ model: request.model.model, system: systems, messages, max_tokens: request.maxOutputTokens, stream: true, tools: normalizeTools(request.tools).map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })), ...asObject(extra.request_options) })
     debugRequest(request, url, { headers, body }); const response = await fetch(url, { method: 'POST', signal: request.signal, headers, body }); const responseFrames: JsonObject[] = []; const frameDebug = debugResponse(request, response, responseFrames)
     if (!response.ok) await throwHttp(response, request.onDebug)
     const calls = new Map<number, { id: string; name: string; arguments: string }>(); const contentBlocks = new Map<number, JsonObject>()
@@ -392,7 +412,7 @@ class GeminiAdapter implements ProviderAdapter {
       ] : [{ text: item.content }] }
     })
     const headers = { 'Content-Type': 'application/json', ...asObject(extra.headers) as Record<string, string> }
-    const body = JSON.stringify({ systemInstruction: system ? { parts: [{ text: system }] } : undefined, contents, ...(request.tools.length ? { tools: [{ functionDeclarations: request.tools.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema })) }] } : {}), generationConfig: { maxOutputTokens: request.maxOutputTokens }, ...asObject(extra.request_options) })
+    const body = JSON.stringify({ systemInstruction: system ? { parts: [{ text: system }] } : undefined, contents, ...(request.tools.length ? { tools: [{ functionDeclarations: normalizeTools(request.tools).map(tool => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema })) }] } : {}), generationConfig: { maxOutputTokens: request.maxOutputTokens }, ...asObject(extra.request_options) })
     debugRequest(request, url, { headers, body }); const response = await fetch(url, { method: 'POST', signal: request.signal, headers, body }); const responseFrames: JsonObject[] = []; const frameDebug = debugResponse(request, response, responseFrames)
     if (!response.ok) await throwHttp(response, request.onDebug)
     let rawFinishReason = ''
