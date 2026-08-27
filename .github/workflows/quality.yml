@@ -28,4 +28,7 @@ jobs:
           node-version: 25.2.1
           cache: npm
       - run: npm ci
+      # Electron 43 no longer downloads its platform runtime during npm ci.
+      # The desktop smoke test launches Electron.app, so install it explicitly.
+      - run: npx install-electron
       - run: npm run test:electron
