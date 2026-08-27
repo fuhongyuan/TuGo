@@ -3227,17 +3227,6 @@ export default function App() {
         <div className="topbar-actions">
           <button
             className="icon-btn"
-            title={status.model === "ready" ? t("aiWorkflow") : t("connectAiModel")}
-            onClick={() =>
-              status.model === "ready"
-                ? setAiConfigurationOpen(true)
-                : setSettingsOpen(true)
-            }
-          >
-            <SlidersHorizontal size={18} />
-          </button>
-          <button
-            className="icon-btn"
             title={t("modelSettings")}
             onClick={() => setSettingsOpen(true)}
           >
@@ -7273,7 +7262,7 @@ function SettingsDialog({
             className={tab === "mcp" ? "active" : ""}
             onClick={() => setTab("mcp")}
           >
-            MCP
+            MCP <span className="tab-badge beta">Beta</span>
           </button>
           <button
             className={tab === "skills" ? "active" : ""}
