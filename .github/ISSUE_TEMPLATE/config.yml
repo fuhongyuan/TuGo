@@ -1,0 +1,4 @@
+# Enable GitHub private vulnerability reporting before public launch.
+# Do not publish an invented repository URL.
+blank_issues_enabled: true
+contact_links: []

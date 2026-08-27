@@ -1,0 +1,14 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "TuGo: Web 预览", "type": "npm", "script": "dev:web", "isBackground": true, "problemMatcher": { "owner": "vite", "pattern": { "regexp": ".*" }, "background": { "activeOnStart": true, "beginsPattern": ".*", "endsPattern": "Local:.*5189" } } },
+    { "label": "TuGo: 桌面调试", "type": "npm", "script": "dev", "problemMatcher": [] },
+    { "label": "TuGo: 前端测试", "type": "npm", "script": "test", "problemMatcher": [] },
+    { "label": "TuGo: Runtime 测试", "type": "npm", "script": "test:runtime", "problemMatcher": [] },
+    { "label": "TuGo: 冻结 Runtime", "type": "npm", "script": "runtime:build", "problemMatcher": [] },
+    { "label": "TuGo: 构建", "type": "npm", "script": "build", "problemMatcher": [] },
+    { "label": "TuGo: 打 macOS DMG", "type": "npm", "script": "package:mac:dmg", "problemMatcher": [] },
+    { "label": "TuGo: 打 macOS ZIP", "type": "npm", "script": "package:mac:zip", "problemMatcher": [] },
+    { "label": "TuGo: 打 Windows EXE", "type": "npm", "script": "package:win", "problemMatcher": [] }
+  ]
+}
