@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "TuGo: 浏览器画布预览",
+      "type": "pwa-chrome",
+      "request": "launch",
+      "url": "http://127.0.0.1:5189",
+      "webRoot": "${workspaceFolder}/src",
+      "preLaunchTask": "TuGo: Web 预览"
+    },
+    {
+      "name": "TuGo: 桌面调试",
+      "type": "node-terminal",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "command": "npm run dev"
+    }
+  ],
+  "compounds": []
+}

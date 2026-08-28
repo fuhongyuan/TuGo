@@ -1,0 +1,34 @@
+name: quality
+
+on:
+  pull_request:
+  push:
+    branches: [main, codex/release-1.0]
+
+jobs:
+  source-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 25.2.1
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --run
+      - run: npm run test:compat
+
+  macos-desktop:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 25.2.1
+          cache: npm
+      - run: npm ci
+      # Electron 43 no longer downloads its platform runtime during npm ci.
+      # The desktop smoke test launches Electron.app, so install it explicitly.
+      - run: npx install-electron
+      - run: npm run test:electron

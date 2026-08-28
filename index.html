@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'" />
+    <title>TuGo</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      if (location.protocol === 'file:' && !location.pathname.includes('/dist-web/')) {
+        document.documentElement.style.colorScheme = 'light'
+        document.body.style.cssText = 'margin:0;display:grid;place-items:center;min-height:100vh;background:#f4f6fb;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#172033'
+        document.getElementById('root').innerHTML = '<main style="max-width:560px;padding:36px 40px;border:1px solid #dfe4ef;border-radius:18px;background:white;box-shadow:0 24px 70px rgba(36,47,70,.12)"><h1 style="margin:0 0 12px">TuGo 源码不能直接打开</h1><p style="line-height:1.7;color:#667085">请在 TuGo 目录执行：</p><code style="display:block;padding:12px 14px;border-radius:8px;background:#eef2ff;color:#4f46e5;font-weight:700">npm run dev</code><p style="margin-top:18px;font-size:13px;line-height:1.6;color:#98a2b3">该命令会启动完整桌面调试版。<br>如只需浏览器预览画布，可执行 npm run dev:web。</p></main>'
+      }
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

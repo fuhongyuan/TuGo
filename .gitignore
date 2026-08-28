@@ -1,0 +1,17 @@
+node_modules/
+.DS_Store
+dist/
+dist-web/
+.electron-cache/
+.electron-builder-cache/
+dev-shell/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+local-backend.log
+.zcode/
+release/
+release-rc/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

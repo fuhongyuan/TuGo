@@ -1,0 +1,52 @@
+{
+  "appId": "com.agentplatform.tugo",
+  "productName": "TuGo",
+  "executableName": "TuGo",
+  "icon": "assets/tugo.png",
+  "asar": true,
+  "electronFuses": {
+    "runAsNode": false,
+    "enableCookieEncryption": true,
+    "enableNodeOptionsEnvironmentVariable": false,
+    "enableNodeCliInspectArguments": false,
+    "enableEmbeddedAsarIntegrityValidation": true,
+    "onlyLoadAppFromAsar": true
+  },
+  "directories": { "output": "release" },
+  "files": [
+    "dist-web/**",
+    "electron/*.cjs",
+    "runtime-ts/dist/*.js",
+    "templates/runtime-defaults.json",
+    "assets/**",
+    "package.json",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md",
+    "tugo-config.bundle.json",
+    "!node_modules/**/*.map",
+    "!node_modules/**/*.d.ts",
+    "!node_modules/**/examples/**",
+    "!node_modules/**/src/**",
+    "!node_modules/**/{test,tests,__tests__}/**",
+    "!node_modules/@modelcontextprotocol/sdk/dist/cjs/**",
+    "!node_modules/@modelcontextprotocol/sdk/dist/esm/server/auth/handlers/**",
+    "!node_modules/@modelcontextprotocol/sdk/dist/esm/server/auth/middleware/**",
+    "!node_modules/@modelcontextprotocol/sdk/dist/esm/server/auth/providers/**",
+    "!node_modules/@modelcontextprotocol/sdk/dist/esm/server/auth/{clients,provider,router,types}.js",
+    "!node_modules/@modelcontextprotocol/sdk/dist/esm/server/{completable,express,index,mcp,sse,sseKeepAlive,stdio,streamableHttp,webStandardStreamableHttp}.js",
+    "!node_modules/@modelcontextprotocol/sdk/dist/esm/server/middleware/**",
+    "!node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/{mcp-server,server}.js",
+    "!node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/stores/**"
+  ],
+  "mac": {
+    "target": ["dmg", "zip"],
+    "category": "public.app-category.productivity",
+    "identity": "-",
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false,
+    "entitlements": "build/entitlements.mac.dev.plist",
+    "entitlementsInherit": "build/entitlements.mac.dev.plist"
+  },
+  "win": { "target": ["nsis"] }
+}
