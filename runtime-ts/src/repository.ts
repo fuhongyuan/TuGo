@@ -1222,7 +1222,7 @@ export class RuntimeRepository {
     const timestamp = now()
     // A late failure/cancel event must never rewrite a completed run (or the
     // inverse). The first terminal transition wins and clears the active run.
-    this.run('UPDATE runs SET status=?,error_json=?,updated_at=?,completed_at=? WHERE run_id=? AND status=?', [status, error ? JSON.stringify(error) : null, timestamp, timestamp, runId, current])
+    this.run('UPDATE runs SET status=?,error_json=?,updated_at=?,completed_at=? WHERE run_id=? AND status=?', [status, error ? JSON.stringify(redact(error)) : null, timestamp, timestamp, runId, current])
     if (this.db.getRowsModified() !== 1) return false
     const run = this.get('SELECT thread_id FROM runs WHERE run_id=?', [runId])
     if (run) this.run('UPDATE threads SET active_run_id=NULL,updated_at=? WHERE thread_id=? AND active_run_id=?', [timestamp, run.thread_id, runId])
@@ -1280,7 +1280,19 @@ export class RuntimeRepository {
     const run = resolvedRunId ? this.get('SELECT status,error_json FROM runs WHERE run_id=?', [resolvedRunId]) : undefined
     const failed = run?.status === 'failed' || run?.status === 'interrupted' ? [...items].reverse().find(item => item.status === 'failed' || item.status === 'interrupted' || String(item.event_type).endsWith('.error')) : undefined
     const runError = json<JsonObject>(run?.error_json, {})
-    return { run_id: resolvedRunId || null, status: run?.status || null, failure: failed ? { phase: failed.phase, actor: failed.actor, event_type: failed.event_type, category: failed.error_category || objectValue(failed.payload).category || runError.category || null, message: objectValue(failed.payload).error || objectValue(failed.payload).message || runError.message || runError.reason || null, correlation_id: failed.correlation_id || null } : null, loops }
+    const failedPayload = failed ? objectValue(failed.payload) : {}
+    const extractErrorDetail = (source: JsonObject): Record<string, unknown> => {
+      const detail: Record<string, unknown> = {}
+      const pick = (key: string) => { const value = source[key]; if (value !== undefined && value !== null && value !== '') detail[key] = value }
+      pick('error_code'); pick('error_category'); pick('retryable'); pick('user_message'); pick('user_action'); pick('technical_detail'); pick('status'); pick('provider_error')
+      return detail
+    }
+    const journalDetail = failed ? extractErrorDetail(failedPayload) : {}
+    const errorJsonDetail = extractErrorDetail(runError)
+    const mergedDetail = { ...errorJsonDetail, ...journalDetail }
+    const failureMessage = failedPayload.error || failedPayload.message || runError.message || runError.user_message || mergedDetail.user_message || null
+    const contractPhase = String(runError.phase || failedPayload.phase || '')
+    return { run_id: resolvedRunId || null, status: run?.status || null, failure: failed ? { phase: failed.phase, ...(contractPhase && contractPhase !== failed.phase ? { contract_phase: contractPhase } : {}), actor: failed.actor, event_type: failed.event_type, category: failed.error_category || failedPayload.category || runError.category || mergedDetail.error_category || null, message: failureMessage, correlation_id: failed.correlation_id || null, ...mergedDetail } : null, loops }
   }
 
   async importAttachment(sourcePath: string, originalName?: string) {

@@ -5691,15 +5691,54 @@ function RunDebugDialog({
               <strong>
                 失败位置：{String(trace.failure.phase || "runtime")} /{" "}
                 {String(trace.failure.actor || "runtime")}
+                {trace.failure.contract_phase ? (
+                  <span className="failure-contract-phase">（错误类型：{String(trace.failure.contract_phase)}）</span>
+                ) : null}
               </strong>
-              <p>
-                {String(
-                  trace.failure.message ||
-                    trace.failure.event_type ||
-                    "运行失败",
-                )}
-              </p>
-              <small>{String(trace.failure.category || "未分类")}</small>
+              {trace.failure.user_message ? (
+                <p className="failure-user-message">
+                  {String(trace.failure.user_message)}
+                </p>
+              ) : null}
+              {trace.failure.user_action ? (
+                <p className="failure-user-action">
+                  <strong>建议操作：</strong>{String(trace.failure.user_action)}
+                </p>
+              ) : null}
+              {trace.failure.message ? (
+                <p className="failure-technical-message">
+                  <strong>错误详情：</strong>{String(trace.failure.message)}
+                </p>
+              ) : null}
+              <div className="failure-metadata">
+                {trace.failure.error_code ? (
+                  <small>错误码：{String(trace.failure.error_code)}</small>
+                ) : null}
+                {trace.failure.category ? (
+                  <small>分类：{String(trace.failure.category)}</small>
+                ) : null}
+                {trace.failure.error_category ? (
+                  <small>错误分类：{String(trace.failure.error_category)}</small>
+                ) : null}
+                {typeof trace.failure.retryable === "boolean" ? (
+                  <small>{trace.failure.retryable ? "可重试" : "不可重试"}</small>
+                ) : null}
+                {trace.failure.status ? (
+                  <small>HTTP {String(trace.failure.status)}</small>
+                ) : null}
+              </div>
+              {trace.failure.technical_detail ? (
+                <details className="failure-technical-detail">
+                  <summary>技术详情</summary>
+                  <pre>{String(trace.failure.technical_detail)}</pre>
+                </details>
+              ) : null}
+              {trace.failure.provider_error ? (
+                <details className="failure-provider-error">
+                  <summary>Provider 错误</summary>
+                  <pre>{JSON.stringify(trace.failure.provider_error, null, 2)}</pre>
+                </details>
+              ) : null}
             </section>
           )}
           {trace?.loops.map((loop) => (

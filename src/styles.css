@@ -473,6 +473,15 @@ html[data-theme='dark'] .debug-timeline-item > summary,
 .debug-failure-summary { margin-bottom: 14px; padding: 12px 13px; border: 1px solid #fecaca; border-radius: 12px; color: #991b1b; background: #fff1f2; }
 .debug-failure-summary p { margin: 5px 0; color: #7f1d1d; font-size: 12px; }
 .debug-failure-summary small { color: #b91c1c; }
+.debug-failure-summary .failure-user-message { font-weight: 600; font-size: 13px; color: #991b1b; }
+.debug-failure-summary .failure-contract-phase { font-size: 11px; color: #b91c1c; font-weight: normal; }
+.debug-failure-summary .failure-user-action { font-size: 12px; color: #b91c1c; margin-top: 6px; }
+.debug-failure-summary .failure-technical-message { font-size: 11px; color: #7f1d1d; opacity: 0.85; }
+.debug-failure-summary .failure-metadata { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.debug-failure-summary .failure-metadata small { background: rgba(254, 202, 202, 0.5); padding: 2px 8px; border-radius: 6px; font-size: 11px; }
+.debug-failure-summary .failure-technical-detail, .debug-failure-summary .failure-provider-error { margin-top: 8px; font-size: 11px; }
+.debug-failure-summary .failure-technical-detail summary, .debug-failure-summary .failure-provider-error summary { cursor: pointer; color: #b91c1c; font-size: 11px; user-select: none; }
+.debug-failure-summary .failure-technical-detail pre, .debug-failure-summary .failure-provider-error pre { margin: 6px 0 0; padding: 8px 10px; background: rgba(255, 255, 255, 0.7); border-radius: 6px; font-size: 11px; max-height: 200px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
 .modal-header { padding: 20px 22px 16px; display: flex; align-items: flex-start; justify-content: space-between; border-bottom: 1px solid var(--border); }
 .modal-header small { color: #8b96a8; font-size: 9px; letter-spacing: .14em; }
 .modal-header h2 { margin: 4px 0 0; font-size: 20px; letter-spacing: -.03em; }

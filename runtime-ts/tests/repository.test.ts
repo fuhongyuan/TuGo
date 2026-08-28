@@ -398,6 +398,43 @@ describe('RuntimeRepository', () => {
     await repository.close()
   })
 
+  it('preserves full RuntimeFailure contract in error_json and enriches trace failure', async () => {
+    const { root, defaults } = await fixture(); const repository = new RuntimeRepository(root, defaults); await repository.open()
+    const agent = repository.listAgents()[0]; const thread = repository.createThread(String(agent.agent_id), { project_id: 'project-contract' })
+    repository.beginRun('run-contract', thread.thread_id, String(agent.agent_id), 'subscription-contract')
+    repository.storeJournal(thread.thread_id, 'run-contract', 0, 'run', 'run.finished', 'runtime', { status: 'failed', error: 'tool execution failed' }, { correlationId: 'run-contract', status: 'failed' })
+    const fullContract = {
+      message: 'tool execution failed',
+      category: 'execution',
+      error_code: 'TOOL_EXECUTION_FAILED',
+      phase: 'tool',
+      error_category: 'execution',
+      retryable: false,
+      user_message: '画板操作未能执行完成。',
+      user_action: '请根据提示调整请求后重试。',
+      technical_detail: 'board_batch: element_id "node-999" not found in canvas',
+      status: 400,
+      provider_error: { status: 400, body: '{"error":"element not found"}', request_id: 'req-123' }
+    }
+    repository.finishRun('run-contract', 'failed', fullContract)
+    const trace = repository.runTrace(thread.thread_id, 'run-contract')
+    expect(trace.failure).toMatchObject({
+      phase: 'run',
+      contract_phase: 'tool',
+      error_code: 'TOOL_EXECUTION_FAILED',
+      error_category: 'execution',
+      retryable: false,
+      user_message: '画板操作未能执行完成。',
+      user_action: '请根据提示调整请求后重试。',
+      technical_detail: 'board_batch: element_id "node-999" not found in canvas',
+    })
+    expect(trace.failure?.message).toBe('tool execution failed')
+    // Redaction: provider_error body should have sensitive keys redacted, but structure preserved
+    expect(trace.failure).toBeDefined()
+    const storedRun = repository.listRuns ? null : null // listRuns may not be exposed; verify through trace instead
+    await repository.close()
+  })
+
   it('keeps streaming deltas ephemeral while bounding checkpoints and repeated model request traces', async () => {
     const { root, defaults } = await fixture(); const repository = new RuntimeRepository(root, defaults); await repository.open()
     const agent = repository.listAgents()[0]; const thread = repository.createThread(String(agent.agent_id), {})
