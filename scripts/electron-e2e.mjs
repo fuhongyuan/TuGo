@@ -67,7 +67,10 @@ const waitForReport = async path => {
 
 const launch = async (mode, launchDataDir = dataDir) => {
   const report = join(testRoot, `${mode}.json`)
-  const flags = [`--tugo-user-data=${launchDataDir}`, `--tugo-e2e-report=${report}`, `--tugo-e2e-mode=${mode}`, `--tugo-e2e-started-at=${Date.now()}`, `--tugo-e2e-provider=${providerUrl}`, `--tugo-e2e-attachment=${attachmentPath}`]
+  // Keep the UI locale deterministic. The smoke assertions exercise visible
+  // controls whose labels are localized, so a runner's host language must not
+  // decide whether the test can find them.
+  const flags = ['--lang=zh-CN', `--tugo-user-data=${launchDataDir}`, `--tugo-e2e-report=${report}`, `--tugo-e2e-mode=${mode}`, `--tugo-e2e-started-at=${Date.now()}`, `--tugo-e2e-provider=${providerUrl}`, `--tugo-e2e-attachment=${attachmentPath}`]
   const args = packagedExecutable ? flags : [root, ...flags]
   let child
   if (process.platform === 'darwin') {

@@ -3227,6 +3227,7 @@ export default function App() {
         <div className="topbar-actions">
           <button
             className="icon-btn"
+            data-e2e="model-settings"
             title={t("modelSettings")}
             onClick={() => setSettingsOpen(true)}
           >

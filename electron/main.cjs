@@ -862,7 +862,7 @@ const createWindow = () => {
               try { return await waitFor(predicate) }
               catch (error) { throw new Error('UI stage ' + name + ' failed: ' + String(error?.message || error)) }
             }
-            click('button[title="模型设置"]')
+            click('button[data-e2e="model-settings"]')
             await waitStage('open settings', () => document.querySelector('.product-settings-modal'))
             const settingsText = document.querySelector('.product-settings-modal')?.textContent || ''
             for (const label of ['模型', 'MCP', 'Skills', '外观', '数据与恢复']) if (!settingsText.includes(label)) throw new Error('missing settings tab: ' + label)
@@ -1161,7 +1161,7 @@ const createWindow = () => {
           const movedUiProject = projects.find(item => item.name === 'UI E2E 文件夹画板')
           const uiFolder = folders.find(item => item.name === 'UI E2E 文件夹')
           if (!renamedUiProject || !movedUiProject || !uiFolder || movedUiProject.folderId !== uiFolder.id) throw new Error('project/folder UI mutations did not persist after restart')
-          document.querySelector('button[title="模型设置"]')?.click(); await waitFor(() => document.querySelector('.product-settings-modal'))
+          document.querySelector('button[data-e2e="model-settings"]')?.click(); await waitFor(() => document.querySelector('.product-settings-modal'))
           const settingsText = document.querySelector('.product-settings-modal')?.textContent || ''
           for (const label of ['模型','MCP','外观','数据与恢复']) if (!settingsText.includes(label)) throw new Error('missing settings tab: ' + label)
           await window.tugo.projects.remove(project.id); await window.tugo.folders.remove(folder.id)
