@@ -29,6 +29,12 @@ npm run dev
 
 `BoardDocument` 保存元素、连线、DSL 与视口。Renderer 使用 Electron bridge；Agent Runtime 在 Worker 中运行，以 IPC 交换事件与画板操作，不开放本地 HTTP 服务。
 
+## 架构蓝图与后续设计
+
+详细设计资料见 [架构目录](architecture/README.md) 与 [三部分实施方案](architecture/IMPLEMENTATION.md)。旧 SDK v0.1 讨论稿已归档，保留历史源码基线，但不再作为现行实施范围。
+
+重构按 Kernel、TuGo 应用包、平台宿主三方接口推进，保留既有配置、凭据和数据。实际测试及打包结果在交付记录中填写，不以方案存在表示实现通过。
+
 ## 测试入口
 
 | 命令 | 用途 |
