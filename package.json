@@ -47,24 +47,24 @@
     "undici": "^7.29.0"
   },
   "devDependencies": {
-    "@types/node": "^22.10.1",
+    "@types/node": "^26.4.0",
     "@types/react": "^19.0.2",
-    "@types/react-dom": "^19.0.2",
+    "@types/react-dom": "^19.2.5",
     "@types/sql.js": "^1.4.9",
-    "@vitejs/plugin-react": "^4.3.4",
-    "electron": "43.4.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "electron": "44.0.0",
     "electron-builder": "26.15.3",
-    "jsdom": "^26.0.0",
+    "jsdom": "^30.0.1",
     "jspdf": "^4.2.1",
-    "lucide-react": "^0.468.0",
-    "mermaid": "^11.16.1",
+    "lucide-react": "^1.37.0",
+    "mermaid": "^11.17.2",
     "pptxgenjs": "^4.0.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "typescript": "~5.7.2",
-    "vite": "^6.0.5",
-    "vitest": "^3.0.5"
+    "typescript": "~7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
   }
 }
