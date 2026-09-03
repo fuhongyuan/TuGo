@@ -42,9 +42,9 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ajv": "^8.20.0",
     "jszip": "^3.10.1",
-    "pdfjs-dist": "^5.4.149",
-    "sql.js": "^1.13.0",
-    "undici": "^7.29.0"
+    "pdfjs-dist": "^6.3.289",
+    "sql.js": "^1.14.2",
+    "undici": "^8.10.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
