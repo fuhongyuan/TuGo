@@ -88,6 +88,7 @@ import {
   createRunPresentation,
   reduceRunPresentation,
   runDurationLabel,
+  runCacheHitLabel,
   runElapsedLabel,
   runIsQuiet,
   runTokenLabel,
@@ -5108,8 +5109,8 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
                   <span title="本次运行耗时">{runDurationLabel(completedSummary.durationMs)}</span>
                 )}
                 {completedSummary.usage && (
-                  <span title={`输入 ${completedSummary.usage.inputTokens} · 输出 ${completedSummary.usage.outputTokens}${completedSummary.usage.cachedInputTokens ? ` · 缓存 ${completedSummary.usage.cachedInputTokens}` : ""}`}>
-                    {runTokenLabel(completedSummary.usage.totalTokens)}
+                  <span title={`输入 ${completedSummary.usage.inputTokens} · 输出 ${completedSummary.usage.outputTokens} · 缓存命中 ${completedSummary.usage.cachedInputTokens}`}>
+                    {runTokenLabel(completedSummary.usage.totalTokens)} · {runCacheHitLabel(completedSummary.usage.cachedInputTokens, completedSummary.usage.inputTokens)}
                   </span>
                 )}
                 {message.threadId && message.runId && (

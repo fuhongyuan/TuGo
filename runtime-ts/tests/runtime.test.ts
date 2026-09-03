@@ -11,6 +11,7 @@ afterEach(async () => { vi.unstubAllGlobals(); await Promise.all(roots.splice(0)
 const sse = (chunks: unknown[]) => new Response(chunks.map(value => `data: ${JSON.stringify(value)}\n\n`).join('') + 'data: [DONE]\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
 const promptTemplates = [
   { name: 'runtime.system', content: '{{agent_soul}}{{conversation_summary}}\nTools: {{tool_names}}', version: 'test' },
+  { name: 'runtime.context', content: 'Runtime: {{runtime_context}}\nAttachments: {{attachment_context}}{{conversation_summary}}', version: 'test' },
   { name: 'runtime.summarize', content: 'Summarize facts.', version: 'test' },
   { name: 'runtime.retry', content: 'Retry with valid JSON.', version: 'test' },
   { name: 'runtime.attachment_note', content: 'Attachments: {{attachment_ids}}', version: 'test' },
@@ -238,6 +239,13 @@ describe('TuGoRuntime loop', () => {
     expect(JSON.stringify(requestBody?.tools || [])).toContain('board_capture_image')
     expect(prompt).toContain('<available_skills>')
     expect(prompt).toContain('tugo-architect')
+    const requestMessages = requestBody?.messages as Array<{ role: string; content: string }>
+    expect(requestMessages.map(message => message.role)).toEqual(['system', 'system', 'system', 'user', 'system'])
+    expect(requestMessages[0]?.content).toContain('Available tools:')
+    expect(requestMessages[1]?.content).toContain('<available_skills>')
+    expect(requestMessages[2]?.content).toContain('<plan_guidance>')
+    expect(requestMessages[3]?.content).toContain('用户请求：你好')
+    expect(requestMessages[4]?.content).toContain('Current runtime context:')
     const runId = messages.find(item => item.kind === 'event' && item.event.type === 'session.started' && item.subscription_id === 's1')
     const snapshot = runId?.kind === 'event' ? runtime.repository.runConfigSnapshot(runId.event.run_id) : undefined
     expect(snapshot).toMatchObject({ version: 1, agent: { name: 'tugo-architect' }, model: { model: 'test' } })

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createRunPresentation, reduceRunPresentation, runDurationLabel, runIsQuiet, runTokenLabel, summarizeRunPresentation } from './runPresentation'
+import { createRunPresentation, reduceRunPresentation, runCacheHitLabel, runDurationLabel, runIsQuiet, runTokenLabel, summarizeRunPresentation } from './runPresentation'
 
 describe('run presentation', () => {
   it('never derives fake progress from a sequence of runtime events', () => {
@@ -154,5 +154,7 @@ describe('run presentation', () => {
     expect(summary?.text).toContain('保存 1 个快照')
     expect(runDurationLabel(summary?.durationMs)).toBe('24 秒')
     expect(runTokenLabel(summary?.usage?.totalTokens)).toBe('1.5K tokens')
+    expect(runCacheHitLabel(summary?.usage?.cachedInputTokens, summary?.usage?.inputTokens)).toBe('缓存命中 800（67%）')
+    expect(runCacheHitLabel(0, 1200)).toBe('缓存命中 0（0%）')
   })
 })

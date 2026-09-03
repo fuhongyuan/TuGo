@@ -251,4 +251,11 @@ export const runTokenLabel = (total = 0) => total < 1000
   ? `${total} tokens`
   : `${(total / 1000).toFixed(total < 10_000 ? 1 : 0)}K tokens`
 
+export const runCacheHitLabel = (cached = 0, input = 0) => {
+  const safeCached = Math.max(0, cached)
+  const rate = input > 0 ? Math.min(100, safeCached / input * 100) : 0
+  const count = safeCached < 1000 ? String(safeCached) : `${(safeCached / 1000).toFixed(safeCached < 10_000 ? 1 : 0)}K`
+  return `缓存命中 ${count}（${rate.toFixed(rate > 0 && rate < 10 ? 1 : 0)}%）`
+}
+
 export const runIsQuiet = (status: ChatRunStatus, now = Date.now()) => now - new Date(status.lastActivityAt).getTime() >= 8_000

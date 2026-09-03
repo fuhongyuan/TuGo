@@ -1113,12 +1113,12 @@ const createWindow = () => {
             const afterTwo = await window.tugo.conversations.list()
             if (afterTwo.conversations.filter(item => item.projectId === targetProject.id && item.messages.some(message => /^E2E conversation (one|two)$/.test(message.content))).length !== 2) throw new Error('first sends did not create two independent conversations')
             click('button[title="会话历史"]')
-            await waitStage('open conversation history', () => document.querySelector('.conversation-popover'))
+            await waitStage('open conversation history', () => document.querySelector('.conversation-drawer'))
             // The compact history UI intentionally previews the last assistant
             // response rather than the user's first prompt. The persistence
             // assertion above identifies both conversations; selecting the
             // older rendered entry verifies the actual switch affordance.
-            const historyEntries = [...document.querySelectorAll('.conversation-popover button')]
+            const historyEntries = [...document.querySelectorAll('.conversation-drawer nav button')]
             const firstConversationEntry = historyEntries[1]
             if (!(firstConversationEntry instanceof HTMLElement)) throw new Error('first conversation missing from history UI')
             firstConversationEntry.click()

@@ -57,13 +57,22 @@ const describeContext = (hook: string, context: BeforeModelContext | AfterModelC
   return { tool_call_id: value.call.id, tool_name: value.call.name, arguments: value.call.arguments, loop_signatures: value.checkpoint.loopSignatures.slice(-5), tool_frequencies: value.checkpoint.toolFrequencies || {} }
 }
 
+// Provider prompt caches match a stable prefix. Middleware instructions that
+// are identical for a run therefore belong beside the base system prompt,
+// before conversation turns. Volatile state (for example the current plan)
+// remains at the end so changing it does not invalidate the reusable prefix.
+const insertStableSystemMessage = (messages: RuntimeMessage[], content: string) => {
+  const firstConversationMessage = messages.findIndex(message => message.role !== 'system')
+  messages.splice(firstConversationMessage < 0 ? messages.length : firstConversationMessage, 0, { role: 'system', content })
+}
+
 export class SkillCatalogMiddleware implements RuntimeMiddleware {
   readonly name = 'skill-catalog'
   constructor(private readonly prompt: PromptRenderer) {}
   beforeModel(context: BeforeModelContext) {
     if (!context.skills.length) return
     const catalog = context.skills.map(skill => `- ${skill.skill_id} (${skill.slug}): ${skill.description || skill.name} [v${skill.version}]`).join('\n')
-    context.messages.push({ role: 'system', content: this.prompt('middleware.skill_catalog', { catalog }) })
+    insertStableSystemMessage(context.messages, this.prompt('middleware.skill_catalog', { catalog }))
   }
 }
 
@@ -74,8 +83,8 @@ export class PlanMiddleware implements RuntimeMiddleware {
     if (this.mode === 'disabled') return
     const current = context.checkpoint.plan
     if (current) context.messages.push({ role: 'system', content: this.prompt('middleware.plan_current', { plan: JSON.stringify(current) }) })
-    else if (this.mode === 'required') context.messages.push({ role: 'system', content: this.prompt('middleware.plan_required') })
-    else context.messages.push({ role: 'system', content: this.prompt('middleware.plan_optional') })
+    else if (this.mode === 'required') insertStableSystemMessage(context.messages, this.prompt('middleware.plan_required'))
+    else insertStableSystemMessage(context.messages, this.prompt('middleware.plan_optional'))
   }
   afterModel(context: AfterModelContext) {
     if (this.mode === 'disabled') return

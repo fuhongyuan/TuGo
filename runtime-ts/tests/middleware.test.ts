@@ -26,6 +26,31 @@ describe('runtime middleware pipeline', () => {
     expect(messages[0]?.content).toContain('Draw diagrams')
   })
 
+  it('keeps reusable skill and plan instructions ahead of conversation history', async () => {
+    const built = buildMiddlewarePipeline({ plan: { mode: 'optional' }, loopDetection: { enabled: false } }, undefined, prompt)
+    const messages: RuntimeMessage[] = [
+      { role: 'system', content: 'stable runtime prompt' },
+      { role: 'user', content: 'hello' },
+      { role: 'system', content: 'volatile runtime context' },
+    ]
+    await built.pipeline.beforeModel({ checkpoint: checkpoint(), messages, tools: [planTool], skills: [{ skill_id: 'skill-1', slug: 'diagram', name: 'Diagram', description: 'Draw diagrams', version: '2' }] })
+    expect(messages.map(message => message.content)).toEqual([
+      'stable runtime prompt',
+      expect.stringContaining('middleware.skill_catalog'),
+      'middleware.plan_optional:',
+      'hello',
+      'volatile runtime context',
+    ])
+  })
+
+  it('keeps changing plan state after conversation history', async () => {
+    const built = buildMiddlewarePipeline({ plan: { mode: 'optional' }, loopDetection: { enabled: false } }, undefined, prompt)
+    const state = checkpoint(); state.plan = { id: 'plan-1', status: 'active', steps: [] }
+    const messages: RuntimeMessage[] = [{ role: 'system', content: 'stable runtime prompt' }, { role: 'user', content: 'hello' }]
+    await built.pipeline.beforeModel({ checkpoint: state, messages, tools: [planTool], skills: [] })
+    expect(messages.at(-1)?.content).toContain('middleware.plan_current')
+  })
+
   it('reports only middleware hooks that actually execute', async () => {
     const entries: Array<{ middleware: string; hook: string; status: string }> = []
     const built = buildMiddlewarePipeline({ plan: { mode: 'optional' }, loopDetection: {} }, entry => entries.push(entry), prompt)

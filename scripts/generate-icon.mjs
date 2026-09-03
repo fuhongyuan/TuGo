@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process'
 const root = resolve(import.meta.dirname, '..')
 const source = join(root, 'assets', 'tugo-logo.png')
 const output = join(root, 'assets', 'tugo.png')
+const pythonExecutable = process.env.TUGO_ICON_PYTHON || 'python3'
 
 // Non-darwin builds ship the raw logo; only macOS needs the composed icon
 // (electron-builder derives .icns from this 1024px PNG).
@@ -41,8 +42,7 @@ print('ok')
 `
 
 await new Promise((resolvePromise, rejectPromise) => {
-  const child = spawn('python3', ['-c', script], { stdio: 'inherit' })
+  const child = spawn(pythonExecutable, ['-c', script], { stdio: 'inherit' })
   child.once('error', rejectPromise)
-  child.once('exit', code => code === 0 ? resolvePromise() : rejectPromise(new Error(`python3 exited with ${code}`)))
+  child.once('exit', code => code === 0 ? resolvePromise() : rejectPromise(new Error(`${pythonExecutable} exited with ${code}`)))
 })
-
