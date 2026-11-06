@@ -16,7 +16,7 @@
 未通过或尚未完成：
 - 导出视觉黄金基线检查失败，SVG 指纹与旧基线不同；LibreOffice 渲染图观察到中文缺字，尚未区分字体环境问题和产品回归。未更新基线掩盖失败。
 - 1000 元素规模测试运行时间过长，未获得通过结论。
-- Windows 构建和打包态验证以附带的 GitHub Actions 运行结果为准。
+- Windows CI 生产构建通过，全量测试 593 通过、28 失败，集中在证据存储与 Runtime 恢复；失败后停止 EXE 构建和发布。运行：https://github.com/fuhongyuan/TuGo/actions/runs/42153702082 。不能将这些结果称为 Windows 验收通过。
 - 无 Apple Developer ID 签名或公证，无 Windows 代码签名声明；没有人工 Windows 安装体验验收。
 
-因此此版本作为预发布提供，不宣称完成全部正式发布门禁。
+因此 Release 保持预发布草稿，未公开发布；Mac 候选包可供本地试用，不宣称完成全部正式发布门禁。
