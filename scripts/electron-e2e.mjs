@@ -81,7 +81,8 @@ const launch = async (mode, launchDataDir = dataDir) => {
     // LaunchServices and can silently deliver arguments to an already-running
     // app instance, which makes an isolated E2E run miss its report path.
     child = spawn(executable, args, { cwd: root, stdio: 'inherit' })
-  } else child = spawn(process.execPath, [electronCli, ...args], { cwd: root, stdio: 'inherit' })
+  } else if (packagedExecutable) child = spawn(packagedExecutable, flags, { cwd: root, stdio: 'inherit' })
+  else child = spawn(process.execPath, [electronCli, ...args], { cwd: root, stdio: 'inherit' })
   const exited = new Promise(resolveExit => child.once('exit', (code, signal) => resolveExit({ code, signal })))
   try {
     const result = await Promise.race([
