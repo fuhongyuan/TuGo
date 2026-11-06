@@ -1,4 +1,4 @@
-import {writeFile} from 'node:fs/promises'
+import {mkdir,writeFile} from 'node:fs/promises'
 const groups=[
 ['C1','运行与编排','#ed2142','#fff1f2',24,104,1490,108,['Task Runtime','Agent Factory','Workflow Engine','Subagent Runtime','Background Jobs'],'R'],
 ['C2','模型与认知','#245bff','#eef7ff',24,224,650,216,['Model Invocation','Model Routing','Model Catalog','Context Assembly','Context Compaction','Memory Store','Instruction Assembly','Speech Processing'],'M'],
@@ -28,5 +28,6 @@ text('inventory-heading',24,750,1490,27,'46 个 Seam 列表（按类别分组）
 const widths=[174,196,364,174,182,172,186];let tx=24
 for(const [j,g] of groups.entries()){const [id,name,color,fill,,,,,names,prefix]=g;const w=widths[j];box('table-'+id,tx,782,w,213,'',fill,color,12,'frame');text('table-head-'+id,tx,782,w,29,`${id} ${name} (${names.length})`,15,color,{fontWeight:'bold',textAlign:'left'});names.forEach((n,i)=>{let c=id==='C3'?Math.floor(i/6):0,r=id==='C3'?i%6:i; text('table-row-'+id+i,tx+c*w/2+4,813+r*20,id==='C3'?w/2-8:w-8,23,`${prefix}${String(i+1).padStart(2,'0')}   ${n.replace('\n',' ')}`,11,'#233858',{textAlign:'left'})});tx+=w+8}
 const doc={version:1,elements,edges,viewport:{x:0,y:0,zoom:1}}
+await mkdir('artifacts/seam-regression',{recursive:true})
 await writeFile('artifacts/seam-regression/fixture.json',JSON.stringify(doc,null,2))
 console.log(JSON.stringify({elements:elements.length,nodes:46,edges:edges.length}))

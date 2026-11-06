@@ -90,4 +90,7 @@ try {
     if (difference > 7) throw new Error(`PPTX visual baseline drift is too large (RMS ${difference.toFixed(2)} > 7)`)
   }
   console.log(`visual export passed: ${png.length} bytes`)
-} finally { await rm(root, { recursive: true, force: true }) }
+} finally {
+  if (process.env.TUGO_VISUAL_KEEP === '1') console.log(`Visual inspection files: ${root}`)
+  else await rm(root, { recursive: true, force: true })
+}

@@ -22,7 +22,9 @@ jobs:
       - run: npm ci
       - run: npx install-electron
       - name: Generate deterministic regression fixture
-        run: node scripts/seam-regression.mjs
+        run: |
+          node -e "require('fs').mkdirSync('artifacts/seam-regression',{recursive:true})"
+          node scripts/seam-regression.mjs
       - run: npm run build
       - run: npm test -- --run
       - name: Build x64 NSIS installer
