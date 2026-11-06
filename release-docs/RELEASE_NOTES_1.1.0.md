@@ -24,6 +24,7 @@
 ## 下载与升级
 
 - macOS：Apple Silicon DMG；本次构建采用 ad-hoc 签名，**没有 Apple Developer ID 签名或公证**。
+- DMG 内附《安装前必读》：若 macOS 提示“已损坏／移到废纸篓”，先拖入应用程序，再在终端执行 `xattr -dr com.apple.quarantine "/Applications/TuGo.app"` 后重试。此操作移除该应用的下载隔离标记，不修复实际损坏，也不授予 Apple 公证；无需关闭系统全局安全保护。
 - Windows：x64 EXE 安装器；支持范围以随版本记录的 Windows 验证结果为准。
 - 先退出旧版再安装；沿用 TuGo 应用标识和资料库位置。升级前建议备份完整 profile、附件和原应用，测试不得使用唯一真实数据副本。
 - CLI Skill 作为独立附件提供，不含模型密钥、用户数据或本机接口 token。
