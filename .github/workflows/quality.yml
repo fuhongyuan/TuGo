@@ -15,6 +15,7 @@ jobs:
           node-version: 25.2.1
           cache: npm
       - run: npm ci
+      - run: node scripts/seam-regression.mjs
       - run: npm run build
       - run: npm test -- --run
       - run: npm run test:compat
@@ -31,4 +32,5 @@ jobs:
       # Electron 43 no longer downloads its platform runtime during npm ci.
       # The desktop smoke test launches Electron.app, so install it explicitly.
       - run: npx install-electron
+      - run: node scripts/seam-regression.mjs
       - run: npm run test:electron

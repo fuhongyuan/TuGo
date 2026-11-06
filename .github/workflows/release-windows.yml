@@ -21,6 +21,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx install-electron
+      - name: Generate deterministic regression fixture
+        run: node scripts/seam-regression.mjs
       - run: npm run build
       - run: npm test -- --run
       - name: Build x64 NSIS installer
