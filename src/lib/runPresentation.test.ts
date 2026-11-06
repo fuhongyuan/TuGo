@@ -99,6 +99,8 @@ describe('run presentation', () => {
     expect(status.headline).toBe('正在整理对话上下文')
     status = reduceRunPresentation(status, { type: 'context.summarization.completed', payload: {} }, start)
     expect(status.activity).toMatchObject({ label: '已整理对话上下文', status: 'completed' })
+    status = reduceRunPresentation(status, { type: 'context.summarization.completed', payload: { applied:false } }, start)
+    expect(status.activity).toMatchObject({ label:'保留原始记录，未应用压缩',status:'failed' })
     status = reduceRunPresentation(status, { type: 'plan.step.started', payload: { step_id: 's1', step: { title: '调整网关连线' } } }, start)
     expect(status.activity?.label).toBe('正在进行：调整网关连线')
     status = reduceRunPresentation(status, { type: 'plan.step.completed', payload: { step_id: 's1', step: { title: '调整网关连线' } } }, start)
@@ -157,4 +159,11 @@ describe('run presentation', () => {
     expect(runCacheHitLabel(summary?.usage?.cachedInputTokens, summary?.usage?.inputTokens)).toBe('缓存命中 800（67%）')
     expect(runCacheHitLabel(0, 1200)).toBe('缓存命中 0（0%）')
   })
+  it('does not present a partial quality conclusion as a verified success or runtime crash',()=>{
+    const start='2026-11-03T10:00:00.000Z'
+    const result=reduceRunPresentation(createRunPresentation(start),{type:'session.completed',payload:{status:'partial',completion_reason:'QUALITY_REPAIR_STALLED'}},start)
+    expect(result.headline).toBe('本轮已结束，仍有问题待处理')
+    expect(result.activity?.label).toBe('修改已保存，质量尚未通过')
+  })
+
 })

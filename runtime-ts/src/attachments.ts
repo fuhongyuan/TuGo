@@ -57,9 +57,12 @@ const loadPdfJs = () => {
 
 export const extractPdfText = async (data: Uint8Array) => {
   const { getDocument } = await loadPdfJs()
-  const document = await getDocument({ data: new Uint8Array(data), useWorkerFetch: false, isEvalSupported: false, useSystemFonts: true }).promise
+  // PDF.js 6 removed dynamic-eval configuration and owns cleanup on the
+  // loading task, including failed loads (not on PDFDocumentProxy).
+  const task = getDocument({ data: new Uint8Array(data), useWorkerFetch: false, useSystemFonts: true })
   const pages: string[] = []
   try {
+    const document = await task.promise
     for (let pageNumber = 1; pageNumber <= Math.min(document.numPages, 500); pageNumber += 1) {
       const page = await document.getPage(pageNumber)
       const content = await page.getTextContent()
@@ -67,7 +70,7 @@ export const extractPdfText = async (data: Uint8Array) => {
       pages.push(`[第 ${pageNumber} 页]\n${text}`)
       if (pages.join('\n\n').length >= MAX_EXTRACTED_TEXT) break
     }
-  } finally { await document.destroy() }
+  } finally { await task.destroy() }
   const text = pages.join('\n\n').slice(0, MAX_EXTRACTED_TEXT).trim()
   if (!text) throw new Error('PDF 中没有可提取的文本（可能是扫描图片）')
   return text
@@ -151,4 +154,42 @@ export const inspectAttachment = async (path: string) => {
     if (dimensions.width * dimensions.height > MAX_IMAGE_PIXELS) throw new Error('图片像素超过 4000 万限制，请先缩小图片')
   } else throw new Error(`不支持的附件类型：${extname(path) || '未知格式'}`)
   return { data, mimeType, textContent, dimensions, sha256: digest(data) }
+}
+
+const MODEL_IMAGE_PASS_BYTES = 512 * 1024
+const MODEL_IMAGE_MAX_BYTES = 768 * 1024
+const MODEL_IMAGE_MAX_EDGE = 2048
+
+let canvasModule: typeof import('@napi-rs/canvas') | undefined
+const loadCanvas = () => canvasModule ??= createRequire(import.meta.url)('@napi-rs/canvas') as typeof import('@napi-rs/canvas')
+
+// Vision providers inline images as base64 inside the JSON request body, so a
+// multi-megabyte screenshot exceeds gateway body limits long before the
+// provider sees it (nginx answers 413 with an HTML page). Models re-tile
+// images to ~768px tiles anyway, so a long edge at/below ~2048px and an
+// encoded size under ~0.75 MB keep the request under the common 1 MB default
+// without losing detail the model can perceive.
+export const compressImageForModel = async (data: Uint8Array, mimeType: string): Promise<{ mimeType: string; data: Uint8Array }> => {
+  if (data.byteLength <= MODEL_IMAGE_PASS_BYTES || !['image/png', 'image/jpeg', 'image/webp'].includes(mimeType)) return { mimeType, data }
+  try {
+    const { loadImage, createCanvas } = loadCanvas()
+    const image = await loadImage(data)
+    const longest = Math.max(image.width, image.height)
+    let smallest: { mimeType: string; data: Uint8Array } | undefined
+    for (const [edge, quality] of [[2048, 0.85], [1536, 0.8], [1024, 0.75], [768, 0.7]] as const) {
+      const factor = Math.min(1, edge / longest)
+      const width = Math.max(1, Math.round(image.width * factor)); const height = Math.max(1, Math.round(image.height * factor))
+      const canvas = createCanvas(width, height); const context = canvas.getContext('2d')
+      context.fillStyle = '#ffffff'; context.fillRect(0, 0, width, height) // JPEG has no alpha channel
+      context.drawImage(image, 0, 0, width, height)
+      const encoded = new Uint8Array(await canvas.encode('jpeg', quality))
+      if (encoded.byteLength <= MODEL_IMAGE_MAX_BYTES) return { mimeType: 'image/jpeg', data: encoded }
+      smallest = { mimeType: 'image/jpeg', data: encoded }
+    }
+    return smallest && smallest.data.byteLength < data.byteLength ? smallest : { mimeType, data }
+  } catch {
+    // A decode failure is not new signal: pass the original through and let
+    // the provider surface the real problem instead of failing the run here.
+    return { mimeType, data }
+  }
 }

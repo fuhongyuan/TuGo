@@ -4,7 +4,7 @@ import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { localizedPrompt, normalizePromptLocale, type RuntimePromptLocale } from './localizedPrompts.js'
 import type { JsonObject, ModelConfig, RunCheckpoint, RuntimeMessage, StructuredEvent, ToolCall, ToolDefinition } from './contracts.js'
-import { digest, imageDimensions, inspectAttachment, isRasterImage } from './attachments.js'
+import { compressImageForModel, digest, imageDimensions, inspectAttachment, isRasterImage } from './attachments.js'
 import { canTransitionRun, isRunStatus, isTerminalRunStatus, type RunStatus } from './runState.js'
 import { strictBuiltinToolSchema } from './boardToolSchemas.js'
 
@@ -613,7 +613,9 @@ export class RuntimeRepository {
       this.bindAgentMiddleware(String(seededAgent.agent_id), objectValue(config.middleware || agentTemplate?.middleware))
     }
     // Upgrade the original safety budget for the shipped Lead Agent without
-    // touching installations that deliberately chose another value.
+    // touching installations that deliberately chose another value. The
+    // per-tool frequency budget ships as 20/30, but drawing funnels through
+    // a handful of board tools and healthy runs routinely need more calls.
     if (seededAgent) {
       const middleware = objectValue(this.getAgent(String(seededAgent.agent_id))?.middleware)
       if (Number(middleware.maxLoops) === 40) {
@@ -624,10 +626,14 @@ export class RuntimeRepository {
           ...(Number(middleware.maxRunMs) === 600000 ? { maxRunMs: 1800000 } : {}),
         })
       }
+      const loop = objectValue(middleware.loopDetection)
+      if (Number(loop.frequencyWarnAfter) === 20 && Number(loop.frequencyStopAfter) === 30) {
+        this.bindAgentMiddleware(String(seededAgent.agent_id), { ...middleware, loopDetection: { ...loop, frequencyWarnAfter: 60, frequencyStopAfter: 200 } })
+      }
     }
     // System capabilities added after first launch must be available to the
     // shipped Lead Agent without replacing a user's existing tool bindings.
-    for (const toolName of ['diagram_set_brief', 'diagram_get_brief', 'diagram_review_content', 'diagram_acceptance_check', 'board_optimize_layout', 'board_review_quality', 'board_capture_image', 'board_export_pptx']) if (seededAgent && this.get('SELECT tool_id FROM tool_definitions WHERE name=?', [toolName])) {
+    for (const toolName of ['diagram_set_brief', 'diagram_get_brief', 'diagram_review_content', 'diagram_acceptance_check', 'board_optimize_layout', 'board_review_quality', 'board_observe', 'board_get_observation', 'board_capture_image', 'board_export_pptx']) if (seededAgent && this.get('SELECT tool_id FROM tool_definitions WHERE name=?', [toolName])) {
       this.run('INSERT OR IGNORE INTO agent_tools(agent_id,tool_name,enabled) VALUES(?,?,1)', [seededAgent.agent_id, toolName])
     }
     // Built-in skills introduced by a shipped template are capabilities, not
@@ -820,7 +826,10 @@ export class RuntimeRepository {
     const contextWindow = Number(extra.context_window || 128_000); const maxOutputTokens = Number(extra.max_output_tokens || extra.max_tokens || 32_768)
     if (!Number.isFinite(contextWindow) || contextWindow < 4096) throw new Error('模型 Context Window 至少为 4096')
     if (!Number.isFinite(maxOutputTokens) || maxOutputTokens < 256 || maxOutputTokens >= contextWindow) throw new Error('模型最大输出必须大于等于 256 且小于 Context Window')
-    extra.context_window = contextWindow; extra.max_output_tokens = maxOutputTokens; extra.vision_capable = extra.vision_capable !== false
+    extra.context_window = contextWindow; extra.max_output_tokens = maxOutputTokens
+    if (incoming.vision_capable !== undefined && incoming.vision_capable !== null && typeof incoming.vision_capable !== 'boolean') throw new Error('图片能力必须为 true、false 或 null（未知）')
+    if (identityChanged && !Object.prototype.hasOwnProperty.call(incoming,'vision_capable')) delete extra.vision_capable
+    // A text connection probe is not a vision probe. Do not infer true from absence.
     if (body.is_default !== false) this.run('UPDATE models SET is_default=0')
     const timestamp = now()
     this.run(`INSERT INTO models(model_id,name,provider_id,model,display_name,enabled,is_default,extra_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)
@@ -1284,7 +1293,9 @@ export class RuntimeRepository {
     const extractErrorDetail = (source: JsonObject): Record<string, unknown> => {
       const detail: Record<string, unknown> = {}
       const pick = (key: string) => { const value = source[key]; if (value !== undefined && value !== null && value !== '') detail[key] = value }
-      pick('error_code'); pick('error_category'); pick('retryable'); pick('user_message'); pick('user_action'); pick('technical_detail'); pick('status'); pick('provider_error')
+      pick('error_code'); pick('error_category'); pick('retryable'); pick('user_message'); pick('user_action'); pick('technical_detail'); pick('provider_error')
+      // Journal status is a lifecycle value (e.g. failed), not HTTP status.
+      if(typeof source.status==='number'&&Number.isInteger(source.status)&&source.status>=100&&source.status<=599)detail.status=source.status
       return detail
     }
     const journalDetail = failed ? extractErrorDetail(failedPayload) : {}
@@ -1363,7 +1374,10 @@ export class RuntimeRepository {
       if (!row || Number(row.size || 0) > 20 * 1024 * 1024) continue
       const path = this.attachmentPath(id); if (!path) continue
       const data = await readFile(path); const mimeType = String(row.mime_type || '')
-      if (isRasterImage(mimeType)) result.push({ attachmentId: id, name: String(row.original_name || id), mimeType, dataBase64: data.toString('base64'), ...(messageIndex === undefined ? {} : { messageIndex }) })
+      if (isRasterImage(mimeType)) {
+        const compressed = await compressImageForModel(data, mimeType)
+        result.push({ attachmentId: id, name: String(row.original_name || id), mimeType: compressed.mimeType, dataBase64: Buffer.from(compressed.data).toString('base64'), ...(messageIndex === undefined ? {} : { messageIndex }) })
+      }
     }
     return result
   }

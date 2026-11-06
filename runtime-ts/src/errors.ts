@@ -1,4 +1,5 @@
 import type { JsonObject, ProviderErrorCategory } from './contracts.js'
+import {ContextProjectionError} from './contextProjection.js'
 
 export type ProviderErrorDetail = {
   status?: number
@@ -45,7 +46,7 @@ export const providerCategoryForStatus = (status?: number): ProviderErrorCategor
   : status === 403 ? 'permission'
     : status === 408 ? 'timeout'
       : status === 429 ? 'rate_limit'
-        : status === 400 || status === 404 || status === 409 || status === 422 ? 'validation'
+        : status === 400 || status === 404 || status === 409 || status === 413 || status === 422 ? 'validation'
           : status && status >= 500 ? 'server' : 'unknown'
 
 const visionFailureKind = (detail: string): 'model' | 'gateway' | 'format' | undefined => {
@@ -86,15 +87,23 @@ export const normalizeRuntimeError = (
   context: { hasImageAttachments?: boolean } = {},
 ): RuntimeFailure => {
   if (error instanceof RuntimeFailureError) return error.failure
+  if(error instanceof ContextProjectionError)return {
+    error_code:'CONTEXT_BUDGET_EXCEEDED',phase:'context',category:'context_budget',retryable:false,
+    user_message:'本地上下文预算检查未通过，本次模型请求尚未发送。',
+    user_action:'请减少本轮附件或输入，或在确认模型实际能力后调整上下文配置；直接重试相同内容不会恢复。已保存的工具操作不会重放。',
+    technical_detail:error.message,
+  }
   const technicalDetail = error instanceof Error ? error.message : String(error)
   const provider = error instanceof ModelProviderError ? error : undefined
   const status = provider?.status || Number(technicalDetail.match(/Model API (\d{3})/)?.[1] || 0) || undefined
   const category = provider?.category || (status ? providerCategoryForStatus(status) : error instanceof TypeError ? 'network' : 'unknown')
   const vision = context.hasImageAttachments ? visionFailureKind(technicalDetail) : undefined
+  const contextOverflow=!!provider&&[400,413,422].includes(Number(status))&&/context_length_exceeded|maximum context length|context (?:window|length).{0,60}(?:exceed|limit|too|full)|exceed.{0,60}context|too many tokens|上下文.{0,30}(?:超出|超过|过长)/i.test(technicalDetail)
   let code = /TuGo 尚未配置可用模型/i.test(technicalDetail) ? 'MODEL_NOT_CONFIGURED'
     : /当前模型已停用/i.test(technicalDetail) ? 'MODEL_DISABLED'
       : /当前模型未启用图片理解能力/i.test(technicalDetail) ? 'MODEL_VISION_DISABLED'
         : /模型 Context Window 配置无效|模型最大输出必须/i.test(technicalDetail) ? 'MODEL_CONFIGURATION_INVALID'
+    : contextOverflow ? 'CONTEXT_LIMIT_EXCEEDED'
     : vision === 'model' ? 'MODEL_VISION_UNSUPPORTED'
     : vision === 'gateway' ? 'GATEWAY_VISION_UNSUPPORTED'
       : vision === 'format' ? 'IMAGE_INPUT_FORMAT_UNSUPPORTED'

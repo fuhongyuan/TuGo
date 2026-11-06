@@ -14,7 +14,7 @@ const elementProperties: JsonObject = {
 const edgeProperties: JsonObject = {
   id: { type: 'string', minLength: 1 }, from: { type: 'string' }, to: { type: 'string' }, label: { type: 'string' }, stroke: { type: 'string' }, strokeWidth: { type: 'number', minimum: .5, maximum: 32 },
   strokeStyle: { enum: ['solid', 'dashed', 'dotted'] }, startArrow: { enum: ['none', 'arrow', 'triangle', 'circle', 'diamond'] }, endArrow: { enum: ['none', 'arrow', 'triangle', 'circle', 'diamond'] },
-  routing: { enum: ['curve', 'straight', 'elbow', 'polyline'] }, opacity: { type: 'number', minimum: 0, maximum: 1 }, zIndex: { type: 'integer' }, controlPoints: { type: 'array', items: point },
+  routing: { enum: ['curve', 'straight', 'elbow', 'polyline'], description: 'Prefer elbow for automatic obstacle-aware orthogonal connectors. Straight is a direct segment; curve is smooth; polyline uses manual waypoints. Omit controlPoints for automatic routing.' }, opacity: { type: 'number', minimum: 0, maximum: 1 }, zIndex: { type: 'integer' }, controlPoints: { type: 'array', items: point, description: 'Manual world-space waypoints only. For curves: one quadratic control or two cubic controls. Omit for automatic routing; do not approximate orthogonal routes with arbitrary points.' },
   freeStart: point, freeEnd: point, fromAnchor: anchor, toAnchor: anchor, metadata: { type: 'object' },
 }
 const element: JsonObject = { type: 'object', required: ['id', 'kind', 'x', 'y', 'width', 'height', 'text'], properties: elementProperties, additionalProperties: false }

@@ -7,6 +7,14 @@ import type { RunCheckpoint, ToolDefinition } from '../src/contracts.js'
 afterEach(() => vi.unstubAllGlobals())
 
 describe('safe web access', () => {
+  it('does not start an already cancelled stateful handler',async()=>{
+    const registry=new ToolRegistry({} as never,{} as never,async()=>({}))
+    const controller=new AbortController();controller.abort()
+    const checkpoint={threadId:'t',middlewareState:{}} as RunCheckpoint
+    await expect(registry.execute({name:'plan',description:'plan',source:'builtin',handlerKey:'plan',timeoutMs:1000,inputSchema:{type:'object'}},{steps:[]},checkpoint,controller.signal)).rejects.toMatchObject({name:'AbortError'})
+    expect(checkpoint.plan).toBeUndefined()
+  })
+
   it('revalidates DNS at socket lookup time and rejects mixed public/private answers', async () => {
     const lookup = createPublicLookup(async () => [{ address: '93.184.216.34', family: 4 }, { address: '127.0.0.1', family: 4 }] as never)
     await expect(new Promise((resolve, reject) => lookup('rebind.example', {}, (error, address) => error ? reject(error) : resolve(address)))).rejects.toThrow('non-public')

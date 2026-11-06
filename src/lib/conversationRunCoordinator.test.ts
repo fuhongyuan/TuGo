@@ -21,3 +21,14 @@ describe('ConversationRunCoordinator', () => {
     expect(coordinator.active('conversation-a')).toBeUndefined()
   })
 })
+
+it('keeps a cancelled terminal message when a queued run publishes an older pending snapshot',()=>{
+ const coordinator=new ConversationRunCoordinator()
+ const pending={id:'old',role:'assistant' as const,content:'',createdAt:'',pending:true}
+ const cancelled={...pending,pending:false,content:'已取消本次 AI 操作。'}
+ coordinator.rememberTerminal('c',cancelled)
+ const queued={id:'next',role:'assistant' as const,content:'',createdAt:'',pending:true}
+ expect(coordinator.reconcileTerminal('c',[pending,queued])).toEqual([cancelled,queued])
+ expect(coordinator.reconcileTerminal('other',[pending])).toEqual([pending])
+ expect(coordinator.reconcileTerminal('c',[queued])).toEqual([queued])
+})

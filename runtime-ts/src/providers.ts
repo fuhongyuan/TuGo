@@ -131,7 +131,10 @@ const throwHttp = async (response: Response, onDebug?: ModelRequest['onDebug']) 
   const body = (await response.text()).slice(0, 4000)
   const requestId = response.headers.get('x-oneapi-request-id') || response.headers.get('x-request-id') || response.headers.get('request-id') || undefined
   onDebug?.({ direction: 'response.complete', streaming: false, error: true, status: response.status, body: body || response.statusText, ...(requestId ? { request_id: requestId } : {}) })
-  throw new ModelProviderError(`Model API ${response.status}: ${body || response.statusText}`, response.status, retryAfterMs(response), providerCategoryForStatus(response.status), { status: response.status, category: providerCategoryForStatus(response.status), body: body || response.statusText, requestId })
+  // Gateways answer 413 with an nginx HTML page; keep the user-facing message
+  // readable while the raw body stays in the debug payload above.
+  const detail = response.status === 413 ? '请求体超过网关大小限制（413），常见于过大的图片附件' : body || response.statusText
+  throw new ModelProviderError(`Model API ${response.status}: ${detail}`, response.status, retryAfterMs(response), providerCategoryForStatus(response.status), { status: response.status, category: providerCategoryForStatus(response.status), body: body || response.statusText, requestId })
 }
 
 async function* sse(response: Response, onFrame?: (frame: JsonObject) => void): AsyncGenerator<{ event?: string; data: string }> {

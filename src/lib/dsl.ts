@@ -1,5 +1,6 @@
 import type { BoardDocument, BoardEdge, BoardElement, DslKind } from '../types'
 import { emptyDocument, newId } from '../types'
+import { layoutGraph } from './graphLayout'
 
 const palette = ['#dbeafe', '#dcfce7', '#fef3c7', '#fce7f3', '#ede9fe', '#cffafe']
 // Mermaid labels commonly contain quoted text, HTML line breaks and entities.
@@ -53,7 +54,7 @@ function layoutNodes(nodes: Map<string, { label: string; kind: BoardElement['kin
 }
 
 type MermaidNode = { label: string; kind: BoardElement['kind']; groupId?: string }
-type MermaidGroup = { id: string; label: string; members: string[] }
+type MermaidGroup = { id: string; label: string; members: string[]; parentId?: string }
 
 const mermaidNodeSize = (node: MermaidNode) => {
   const width = node.kind === 'text' ? 210 : 230
@@ -65,181 +66,32 @@ const mermaidNodeSize = (node: MermaidNode) => {
 }
 
 function layoutDirectionalMermaid(nodes: Map<string, MermaidNode>, edges: Array<{ from: string; to: string }>, direction: string): BoardElement[] {
-  const ids = [...nodes.keys()]
-  const incoming = new Map(ids.map(id => [id, 0]))
-  const outgoing = new Map(ids.map(id => [id, [] as string[]]))
-  for (const edge of edges) {
-    if (!nodes.has(edge.from) || !nodes.has(edge.to)) continue
-    outgoing.get(edge.from)!.push(edge.to)
-    incoming.set(edge.to, (incoming.get(edge.to) || 0) + 1)
-  }
-  const ranks = new Map(ids.map(id => [id, 0]))
-  const queue = ids.filter(id => !incoming.get(id))
-  const visited = new Set<string>()
-  while (queue.length) {
-    const id = queue.shift()!
-    if (visited.has(id)) continue
-    visited.add(id)
-    for (const next of outgoing.get(id) || []) {
-      ranks.set(next, Math.max(ranks.get(next) || 0, (ranks.get(id) || 0) + 1))
-      const nextIncoming = (incoming.get(next) || 0) - 1
-      incoming.set(next, nextIncoming)
-      if (nextIncoming === 0) queue.push(next)
-    }
-  }
-  // Cycles do not have a topological root. Retain source order for the
-  // remaining vertices rather than failing the whole import.
-  for (const id of ids) if (!visited.has(id)) ranks.set(id, ranks.get(id) || 0)
-  const lanes = new Map<number, string[]>()
-  for (const id of ids) {
-    const rank = ranks.get(id) || 0
-    if (!lanes.has(rank)) lanes.set(rank, [])
-    lanes.get(rank)!.push(id)
-  }
-  const horizontal = /^(LR|RL)$/i.test(direction)
-  const rankOrder = [...lanes.keys()].sort((a, b) => a - b)
-  const primaryOffset = new Map<number, number>()
-  let cursor = 110
-  for (const rank of rankOrder) {
-    const members = lanes.get(rank) || []
-    const extent = Math.max(...members.map(id => {
-      const size = mermaidNodeSize(nodes.get(id)!)
-      return horizontal ? size.width : size.height
-    }))
-    primaryOffset.set(rank, cursor)
-    cursor += extent + 88
-  }
-  return ids.map((id, index) => {
-    const node = nodes.get(id)!
-    const size = mermaidNodeSize(node)
-    const rank = ranks.get(id) || 0
-    const members = lanes.get(rank) || []
-    const laneIndex = members.indexOf(id)
-    let crossOffset = 100
-    for (const prior of members.slice(0, laneIndex)) {
-      const priorSize = mermaidNodeSize(nodes.get(prior)!)
-      crossOffset += (horizontal ? priorSize.height : priorSize.width) + 64
-    }
-    return {
-      id: makeId(id), kind: node.kind,
-      x: horizontal ? primaryOffset.get(rank)! : crossOffset,
-      y: horizontal ? crossOffset : primaryOffset.get(rank)!,
-      width: size.width, height: size.height, text: node.label || id,
-      fill: palette[index % palette.length], stroke: '#334155', strokeWidth: 2, fontSize: 16,
-      metadata: { dslId: id },
-    } as BoardElement
-  })
+  return layoutGraph(mermaidElements(nodes), edges.map((edge, index) => ({
+    ...edge, id: String(index), from: makeId(edge.from), to: makeId(edge.to), stroke: '#64748b', strokeWidth: 2,
+  })), direction).elements
 }
 
-/**
- * Mermaid flowcharts are directional graphs, not a set of unrelated cards.
- * Keep subgraph membership and arrange each subgraph as a directional lane;
- * this also gives imported diagrams the familiar Mermaid "container" look.
- */
+function mermaidElements(nodes: Map<string, MermaidNode>): BoardElement[] {
+  return [...nodes].map(([id, node], index) => ({
+    id: makeId(id), kind: node.kind, x: 0, y: 0, ...mermaidNodeSize(node),
+    text: node.label || id, fill: '#eff6ff', stroke: '#64748b', strokeWidth: 1.5, fontSize: 16,
+    groupId: node.groupId ? makeId(`group_${node.groupId}`) : undefined,
+    zIndex: index + 1, metadata: { dslId: id },
+  }))
+}
+
 function layoutMermaid(nodes: Map<string, MermaidNode>, edges: Array<{ from: string; to: string }>, groups: MermaidGroup[], direction: string): BoardElement[] {
-  if (!groups.length) return layoutDirectionalMermaid(nodes, edges, direction)
-  // A LR chart whose subgraphs are explicitly named as lanes is a swimlane
-  // diagram, not a set of unrelated nested flowcharts. Keep lanes side by
-  // side and stack their activities vertically. This makes cross-lane arrows
-  // read in the same direction as the business flow.
   if (/^(LR|RL)$/i.test(direction) && groups.length > 1 && groups.every(group => /泳道|lane/i.test(group.label))) {
     return layoutSwimlaneMermaid(nodes, groups, direction)
   }
-  const horizontal = /^(LR|RL)$/i.test(direction)
-  const nodePositions = new Map<string, { x: number; y: number }>()
-  const elements: BoardElement[] = []
-  const ungrouped = [...nodes.keys()].filter(id => !nodes.get(id)?.groupId)
-  const lanes = [...groups, ...(ungrouped.length ? [{ id: '__ungrouped__', label: '', members: ungrouped }] : [])]
-  let groupTop = 96
-
-  // Lay a single subgraph out as a tiny DAG.  The old implementation used
-  // one coordinate as both the group offset and child X position for TB
-  // diagrams, so later groups escaped their own frames.
-  const layoutGroup = (members: string[]) => {
-    const memberSet = new Set(members)
-    const incoming = new Map(members.map(id => [id, 0]))
-    const outgoing = new Map(members.map(id => [id, [] as string[]]))
-    for (const edge of edges) {
-      if (!memberSet.has(edge.from) || !memberSet.has(edge.to)) continue
-      outgoing.get(edge.from)!.push(edge.to)
-      incoming.set(edge.to, (incoming.get(edge.to) || 0) + 1)
-    }
-    const ranks = new Map(members.map(id => [id, 0]))
-    const queue = members.filter(id => !incoming.get(id))
-    const ordered: string[] = []
-    while (queue.length) {
-      const id = queue.shift()!
-      ordered.push(id)
-      for (const next of outgoing.get(id) || []) {
-        ranks.set(next, Math.max(ranks.get(next) || 0, (ranks.get(id) || 0) + 1))
-        const count = (incoming.get(next) || 0) - 1
-        incoming.set(next, count)
-        if (count === 0) queue.push(next)
-      }
-    }
-    for (const id of members) if (!ordered.includes(id)) ordered.push(id)
-    const rankMembers = new Map<number, string[]>()
-    for (const id of ordered) {
-      const rank = ranks.get(id) || 0
-      if (!rankMembers.has(rank)) rankMembers.set(rank, [])
-      rankMembers.get(rank)!.push(id)
-    }
-    const ranksInOrder = [...rankMembers.keys()].sort((a, b) => a - b)
-    const primaryOffsets = new Map<number, number>()
-    let primaryCursor = 0
-    for (const rank of ranksInOrder) {
-      const extent = Math.max(...(rankMembers.get(rank) || []).map(id => {
-        const size = mermaidNodeSize(nodes.get(id)!)
-        return horizontal ? size.width : size.height
-      }))
-      primaryOffsets.set(rank, primaryCursor)
-      primaryCursor += extent + 84
-    }
-    const positions = new Map<string, { x: number; y: number }>()
-    let maxCross = 0
-    for (const rank of ranksInOrder) {
-      let crossCursor = 0
-      for (const id of rankMembers.get(rank) || []) {
-        const size = mermaidNodeSize(nodes.get(id)!)
-        positions.set(id, horizontal
-          ? { x: primaryOffsets.get(rank)!, y: crossCursor }
-          : { x: crossCursor, y: primaryOffsets.get(rank)! })
-        crossCursor += (horizontal ? size.height : size.width) + 58
-      }
-      maxCross = Math.max(maxCross, Math.max(0, crossCursor - 58))
-    }
-    return {
-      positions,
-      width: horizontal ? Math.max(0, primaryCursor - 84) : maxCross,
-      height: horizontal ? maxCross : Math.max(0, primaryCursor - 84),
-    }
-  }
-
-  for (const lane of lanes) {
-    const hasFrame = lane.id !== '__ungrouped__'
-    const layout = layoutGroup(lane.members)
-    const paddingX = hasFrame ? 48 : 0
-    const paddingTop = hasFrame ? 54 : 0
-    const paddingBottom = hasFrame ? 38 : 0
-    const groupLeft = 110
-    for (const [id, position] of layout.positions) nodePositions.set(id, { x: groupLeft + paddingX + position.x, y: groupTop + paddingTop + position.y })
-    const groupWidth = Math.max(230, layout.width + paddingX * 2)
-    const groupHeight = Math.max(120, layout.height + paddingTop + paddingBottom)
-    if (hasFrame && lane.members.length) {
-      // A Mermaid subgraph is an ordinary canvas frame, not a protected
-      // background. Users need to be able to select, move, resize, and delete
-      // it just like any hand-created frame.
-      elements.push({ id: makeId(`group_${lane.id}`), kind: 'frame', x: groupLeft, y: groupTop, width: groupWidth, height: groupHeight, text: lane.label, fill: '#f8fafc', fillOpacity: .58, stroke: '#94a3b8', strokeWidth: 2, strokeStyle: 'dashed', textColor: '#475569', fontSize: 15, fontWeight: 'bold', verticalAlign: 'top', textAlign: 'left', locked: false, zIndex: 0, metadata: { mermaidSubgraph: lane.id } })
-    }
-    groupTop += groupHeight + 92
-  }
-
-  for (const [index, [id, node]] of [...nodes.entries()].entries()) {
-    const size = mermaidNodeSize(node)
-    const position = nodePositions.get(id) || { x: 120 + index * (size.width + 66), y: 110 }
-    elements.push({ id: makeId(id), kind: node.kind, x: position.x, y: position.y, width: size.width, height: size.height, text: node.label || id, fill: palette[index % palette.length], stroke: '#334155', strokeWidth: 2, fontSize: 16, groupId: node.groupId ? makeId(`group_${node.groupId}`) : undefined, zIndex: 1 + index, metadata: { dslId: id } })
-  }
-  return elements
+  const frames: BoardElement[] = groups.map(group => ({
+    id: makeId(`group_${group.id}`), kind: 'frame', x: 0, y: 0, width: 280, height: 140,
+    text: group.label, fill: '#f8fafc', fillOpacity: .35, stroke: '#cbd5e1', strokeWidth: 1,
+    fontSize: 15, fontWeight: 'bold', textColor: '#475569', verticalAlign: 'top', textAlign: 'left',
+    locked: false, zIndex: 0, groupId: group.parentId ? makeId(`group_${group.parentId}`) : undefined,
+    metadata: { mermaidSubgraph: group.id },
+  }))
+  return [...frames, ...mermaidElements(nodes)]
 }
 
 function layoutSwimlaneMermaid(nodes: Map<string, MermaidNode>, groups: MermaidGroup[], direction: string): BoardElement[] {
@@ -351,38 +203,27 @@ function parseMermaidStateDiagram(source: string): BoardDocument {
     if (/^[\w.-]+$/.test(line)) remember(line)
   }
 
-  const horizontal = /^(LR|RL)$/.test(direction)
-  const primary = horizontal ? 275 : 170
-  const cross = horizontal ? 175 : 275
   const stateSize = (label: string) => {
     const lines = label.split('\n').reduce((sum, value) => sum + Math.max(1, Math.ceil(Array.from(value).length / 15)), 0)
     return { width: Math.max(180, Math.min(260, 76 + Math.max(...label.split('\n').map(value => Array.from(value).length)) * 9)), height: Math.max(84, 30 + lines * 24) }
   }
   const normalIds = stateOrder.filter(id => !id.startsWith('__state_'))
   const elements: BoardElement[] = []
-  const positions = new Map<string, { x: number; y: number; width: number; height: number }>()
   normalIds.forEach((id, index) => {
     const size = stateSize(states.get(id) || id)
-    const pos = horizontal
-      ? { x: 145 + index * primary, y: 165 + (index % 2) * 26, ...size }
-      : { x: 175 + (index % 2) * 26, y: 115 + index * primary, ...size }
-    positions.set(id, pos)
-    elements.push({ id: makeId(id), kind: 'rounded_rectangle', ...pos, text: states.get(id) || id, fill: palette[index % palette.length], stroke: '#475569', strokeWidth: 2, fontSize: 16, metadata: { dslId: id, mermaidState: true } })
+    elements.push({ id: makeId(id), kind: 'rounded_rectangle', x: 0, y: 0, ...size, text: states.get(id) || id, fill: '#eff6ff', stroke: '#64748b', strokeWidth: 1.5, fontSize: 16, metadata: { dslId: id, mermaidState: true } })
   })
-  const first = positions.get(normalIds[0])
-  const last = positions.get(normalIds.at(-1) || '')
   const specialPositions: Record<string, { x: number; y: number; width: number; height: number }> = {
-    __state_start: horizontal ? { x: 72, y: (first?.y || 165) + 25, width: 34, height: 34 } : { x: (first?.x || 175) + 72, y: 48, width: 34, height: 34 },
-    __state_end: horizontal ? { x: (last?.x || 145) + (last?.width || 180) + 70, y: (last?.y || 165) + 25, width: 38, height: 38 } : { x: (last?.x || 175) + 72, y: (last?.y || 115) + (last?.height || 84) + 70, width: 38, height: 38 },
+    __state_start: { x: 0, y: 0, width: 34, height: 34 },
+    __state_end: { x: 0, y: 0, width: 38, height: 38 },
   }
   for (const [id, pos] of Object.entries(specialPositions)) {
-    positions.set(id, pos)
     elements.push({ id, kind: 'ellipse', ...pos, text: id === '__state_start' ? '●' : '◎', fill: id === '__state_start' ? '#475569' : '#ffffff', stroke: '#475569', strokeWidth: 2, textColor: id === '__state_start' ? '#475569' : '#475569', fontSize: id === '__state_start' ? 1 : 20, metadata: { mermaidStatePseudo: true } })
   }
   const idFor = (id: string) => id.startsWith('__state_') ? id : makeId(id)
+  const stateEdges: BoardEdge[] = edges.map((edge, index) => ({ id: `state_edge_${index}_${idFor(edge.from)}_${idFor(edge.to)}`, from: idFor(edge.from), to: idFor(edge.to), label: edge.label, stroke: '#64748b', strokeWidth: 2, arrowEnd: true, metadata: { mermaidState: true } }))
   return {
-    ...emptyDocument(), elements,
-    edges: edges.map((edge, index) => ({ id: `state_edge_${index}_${idFor(edge.from)}_${idFor(edge.to)}`, from: idFor(edge.from), to: idFor(edge.to), label: edge.label, stroke: '#64748b', strokeWidth: 2, arrowEnd: true, routing: edge.from === edge.to ? 'curve' : 'elbow', metadata: { mermaidState: true } })),
+    ...emptyDocument(), ...layoutGraph(elements, stateEdges, direction),
     dsl: { kind: 'mermaid', source, updatedAt: new Date().toISOString() },
   }
 }
@@ -467,6 +308,11 @@ type MermaidSpecialRelation = { from: string; to: string; label?: string; value?
 const mermaidTitles: Record<string, string> = { classDiagram: '类图', erDiagram: '实体关系图', journey: '用户旅程', gantt: '甘特图', pie: '饼图', gitGraph: 'Git 图', mindmap: '思维导图', timeline: '时间线', quadrantChart: '四象限图', requirementDiagram: '需求图', 'xychart-beta': 'XY 图表', 'sankey-beta': '桑基图', 'architecture-beta': '架构图', 'block-beta': '区块图', 'packet-beta': '数据包图', kanban: '看板', radar: '雷达图', treemap: '矩形树图', C4Context: 'C4 系统上下文图', C4Container: 'C4 容器图', C4Component: 'C4 组件图', C4Dynamic: 'C4 动态图', C4Deployment: 'C4 部署图', zenuml: 'ZenUML 时序图' }
 
 function specialDocument(source: string, diagram: string, elements: BoardElement[], edges: BoardEdge[] = []): BoardDocument {
+  if (['classDiagram', 'erDiagram', 'requirementDiagram'].includes(diagram)) {
+    const arranged = layoutGraph(elements, edges, 'LR')
+    elements = arranged.elements
+    edges = arranged.edges
+  }
   const title = mermaidTitles[diagram] || diagram
   elements.unshift({ id: `mermaid_${makeId(diagram)}_title`, kind: 'text', x: 96, y: 38, width: 760, height: 36, text: title, fill: 'transparent', stroke: 'transparent', strokeWidth: 0, fontSize: 22, fontWeight: 'bold', textAlign: 'left', verticalAlign: 'middle', metadata: { mermaidDiagram: diagram, mermaidTitle: true } })
   return { ...emptyDocument(), elements, edges, dsl: { kind: 'mermaid', source, updatedAt: new Date().toISOString() } }
@@ -705,7 +551,7 @@ function parseMermaidGantt(source: string, diagram: string): BoardDocument {
   for (const [name, rows] of bySection) {
     const frameY = 132 + row * 70, frameHeight = rows.length * 70 + 20, frameId = makeId(`gantt_section_${name}`)
     elements.push({ id: frameId, kind: 'frame', x: 86, y: frameY, width: Math.max(800, chartX + maxDay * unit - 86), height: frameHeight, text: name, fill: '#f8fafc', fillOpacity: .45, stroke: '#cbd5e1', strokeWidth: 1.5, strokeStyle: 'dashed', fontSize: 14, fontWeight: 'bold', textAlign: 'left', verticalAlign: 'top', metadata: { mermaidDiagram: diagram, mermaidGanttSection: true } })
-    rows.forEach((task, index) => { const y = frameY + 28 + index * 70; elements.push(specialCard(diagram, task, row + index, 108, y, 210, 44, { kind: 'text', fill: 'transparent', stroke: 'transparent', strokeWidth: 0, textAlign: 'left', fontSize: 14, groupId: frameId })); elements.push(specialCard(diagram, task, row + index, chartX + startOf(task) * unit, y, Math.max(48, task.duration * unit), 44, { kind: 'rounded_rectangle', fontSize: 13, groupId: frameId })) })
+    rows.forEach((task, index) => { const y = frameY + 28 + index * 70; elements.push(specialCard(diagram, { ...task, id: `${task.id}_label` }, row + index, 108, y, 210, 44, { kind: 'text', fill: 'transparent', stroke: 'transparent', strokeWidth: 0, textAlign: 'left', fontSize: 14, groupId: frameId })); elements.push(specialCard(diagram, task, row + index, chartX + startOf(task) * unit, y, Math.max(48, task.duration * unit), 44, { kind: 'rounded_rectangle', fontSize: 13, groupId: frameId })) })
     row += rows.length + 1
   }
   return specialDocument(source, diagram, elements)
@@ -727,7 +573,7 @@ function parseMermaidPieOrChart(source: string, diagram: string): BoardDocument 
     values.forEach((item, index) => {
       const next = angle + (item.value || 0) / total * 360
       elements.push(specialCard(diagram, { ...item, label: '' }, index, 120, 120, 278, 278, { kind: 'ellipse', fill: palette[index % palette.length], stroke: '#ffffff', strokeWidth: 2, metadata: { mermaidDiagram: diagram, mermaidPieSlice: { start: angle, end: next }, mermaidId: item.id } }))
-      elements.push(specialCard(diagram, { ...item, label: `${item.label}  ${item.value} (${Math.round((item.value || 0) / total * 100)}%)` }, index, 440, 132 + index * 58, 310, 42, { kind: 'rounded_rectangle', fontSize: 14, textAlign: 'left', fill: '#ffffff', stroke: palette[index % palette.length], strokeWidth: 2 }))
+      elements.push(specialCard(diagram, { ...item, id: `${item.id}_legend`, label: `${item.label}  ${item.value} (${Math.round((item.value || 0) / total * 100)}%)` }, index, 440, 132 + index * 58, 310, 42, { kind: 'rounded_rectangle', fontSize: 14, textAlign: 'left', fill: '#ffffff', stroke: palette[index % palette.length], strokeWidth: 2 }))
       angle = next
     })
     return specialDocument(source, diagram, elements)
@@ -955,14 +801,15 @@ export function parseMermaid(source: string): BoardDocument {
     const directive = line.match(styleDirective)
     if (directive) { const value = safeJson(directive[3]); if (value) directive[1] === 'node' ? nodeStyles.set(makeId(directive[2]), value) : edgeStyles.set(Number(directive[2]), value); continue }
     const chart = line.match(/^(?:graph|flowchart)\s+(\w+)/i)
-    if (chart) { direction = chart[1]; continue }
+    if (chart) { direction = chart[1].toUpperCase().replace(/^TD$/, 'TB'); continue }
+    if (/^direction\s+/i.test(line)) continue
     if (!line || line.startsWith('%%') || /^(style|linkStyle|classDef|class)\b/i.test(line)) continue
     if (/^end$/i.test(line)) { groupStack.pop(); continue }
     const subgraph = line.match(/^subgraph\s+(.+)$/i)
     if (subgraph) {
       const token = parseNodeToken(subgraph[1])
       const id = token.id === subgraph[1].trim() ? makeId(`group_${groups.length + 1}`) : token.id
-      groups.push({ id, label: token.label === token.id ? clean(subgraph[1]) : token.label, members: [] })
+      groups.push({ id, label: token.label === token.id ? clean(subgraph[1]) : token.label, members: [], parentId: groupStack.at(-1) })
       groupStack.push(id)
       continue
     }
@@ -995,6 +842,15 @@ export function parseMermaid(source: string): BoardDocument {
   }
   const elements = layoutMermaid(nodes, rawEdges, groups, direction).map(element => ({ ...element, ...(nodeStyles.get(element.id) || {}) } as BoardElement))
   const idMap = new Map([...nodes.keys()].map(id => [id, makeId(id)]))
+  // Seed directional attachments; the graph layout below replaces these
+  // with shape-aware endpoints and bend points for supported graph edges.
+  const flowAnchors = /^(TB|BT)$/i.test(direction)
+    ? direction.toUpperCase() === 'TB'
+      ? { fromAnchor: { x: .5, y: 1 }, toAnchor: { x: .5, y: 0 } }
+      : { fromAnchor: { x: .5, y: 0 }, toAnchor: { x: .5, y: 1 } }
+    : direction.toUpperCase() === 'LR'
+      ? { fromAnchor: { x: 1, y: .5 }, toAnchor: { x: 0, y: .5 } }
+      : { fromAnchor: { x: 0, y: .5 }, toAnchor: { x: 1, y: .5 } }
   const edges: BoardEdge[] = rawEdges.map((edge, index) => ({
     id: `edge_${index}_${idMap.get(edge.from)}_${idMap.get(edge.to)}`,
     from: idMap.get(edge.from)!,
@@ -1002,9 +858,19 @@ export function parseMermaid(source: string): BoardDocument {
     label: edge.label,
     stroke: '#64748b',
     strokeWidth: 2,
-    arrowEnd: true, ...(edgeStyles.get(index) || {}),
+    arrowEnd: true,
+    endArrow: 'arrow',
+    routing: 'straight',
+    ...flowAnchors,
+    ...(edgeStyles.get(index) || {}),
   }))
-  return { ...emptyDocument(), paletteId, elements, edges, dsl: { kind: 'mermaid', source, updatedAt: new Date().toISOString() } }
+  const arranged = elements.some(element => element.metadata?.mermaidSwimlane)
+    ? { elements, edges: edges.map(edge => ({ ...edge, routing: 'elbow' as const, fromAnchor: undefined, toAnchor: undefined })) }
+    : layoutGraph(elements, edges, direction)
+  // Explicit round-trip geometry belongs to the user, not to automatic layout.
+  arranged.elements = arranged.elements.map(element => ({ ...element, ...(nodeStyles.get(element.id) || {}) } as BoardElement))
+  arranged.edges = arranged.edges.map((edge, index) => ({ ...edge, ...(nodeStyles.size ? { routing: 'elbow' as const, controlPoints: undefined, fromAnchor: undefined, toAnchor: undefined } : {}), ...(edgeStyles.get(index) || {}) }))
+  return { ...emptyDocument(), paletteId, ...arranged, dsl: { kind: 'mermaid', source, updatedAt: new Date().toISOString() } }
 }
 
 export function parsePlantUml(source: string): BoardDocument {
@@ -1030,7 +896,7 @@ export function parsePlantUml(source: string): BoardDocument {
   const edges = rawEdges.map((edge, index): BoardEdge => ({
     id: `edge_${index}_${makeId(edge.from)}_${makeId(edge.to)}`,
     from: makeId(edge.from), to: makeId(edge.to), label: edge.label,
-    stroke: '#64748b', strokeWidth: 2, arrowEnd: true,
+    stroke: '#64748b', strokeWidth: 2, arrowEnd: true, endArrow: 'arrow', routing: 'straight',
   }))
   return { ...emptyDocument(), elements, edges, dsl: { kind: 'plantuml', source, updatedAt: new Date().toISOString() } }
 }

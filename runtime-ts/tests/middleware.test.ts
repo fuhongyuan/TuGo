@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildMiddlewarePipeline } from '../src/middleware.js'
+import { buildMiddlewarePipeline, LoopBlockError } from '../src/middleware.js'
 import type { RunCheckpoint, RuntimeMessage, ToolDefinition } from '../src/contracts.js'
 
 const checkpoint = (): RunCheckpoint => ({ version: 1, threadId: 'thread', runId: 'run', agentId: 'agent', status: 'running', messages: [], completedToolCalls: {}, loopSignatures: [], usage: {}, step: 0 })
@@ -63,7 +63,7 @@ describe('runtime middleware pipeline', () => {
     ])
   })
 
-  it('stops high-frequency calls even when their arguments keep changing', async () => {
+  it('blocks the per-tool budget softly instead of failing the run', async () => {
     const built = buildMiddlewarePipeline({ plan: { enabled: false }, loopDetection: { warnAfter: 99, stopAfter: 100, frequencyWarnAfter: 2, frequencyStopAfter: 3 } }, undefined, prompt)
     const state = checkpoint()
     await built.pipeline.beforeTool({ checkpoint: state, call: { id: '1', name: 'search', arguments: { query: 'a' } } })
@@ -72,6 +72,43 @@ describe('runtime middleware pipeline', () => {
     // providers, so loop warnings are deferred until the Runtime finishes the
     // current tool-call batch.
     expect((state.middlewareState?.deferredToolWarnings as string[] | undefined)?.at(-1)).toContain('middleware.loop_frequency_warning')
-    await expect(built.pipeline.beforeTool({ checkpoint: state, call: { id: '3', name: 'search', arguments: { query: 'c' } } })).rejects.toThrow('调用过于频繁')
+    const block = await built.pipeline.beforeTool({ checkpoint: state, call: { id: '3', name: 'search', arguments: { query: 'c' } } }).then(() => { throw new Error('expected a block') }, error => error as LoopBlockError)
+    expect(block).toBeInstanceOf(LoopBlockError); expect(block.fatal).toBe(false)
+    expect(block.message).toContain('调用预算')
+  })
+
+  it('does not escalate identical calls that are separated by other work', async () => {
+    const built = buildMiddlewarePipeline({ plan: { enabled: false }, loopDetection: { warnAfter: 3, stopAfter: 6 } }, undefined, prompt)
+    const state = checkpoint()
+    for (let round = 0; round < 8; round += 1) {
+      await built.pipeline.beforeTool({ checkpoint: state, call: { id: `test-${round}`, name: 'run_tests', arguments: { command: 'npm test' } } })
+      await built.pipeline.beforeTool({ checkpoint: state, call: { id: `edit-${round}`, name: 'edit', arguments: { file: `f${round}.ts` } } })
+    }
+    expect(state.middlewareState?.loopBlocks).toEqual({})
+  })
+
+  it('soft-blocks a consecutive stuck loop once and fails only on an immediate repeat', async () => {
+    const built = buildMiddlewarePipeline({ plan: { enabled: false }, loopDetection: { warnAfter: 2, stopAfter: 3 } }, undefined, prompt)
+    const state = checkpoint()
+    const identical = (id: string) => built.pipeline.beforeTool({ checkpoint: state, call: { id, name: 'search', arguments: { query: 'same' } } })
+    await identical('1'); await identical('2')
+    const soft = await identical('3').then(() => { throw new Error('expected a block') }, error => error as LoopBlockError)
+    expect(soft).toBeInstanceOf(LoopBlockError); expect(soft.fatal).toBe(false)
+    const fatal = await identical('4').then(() => { throw new Error('expected a block') }, error => error as LoopBlockError)
+    expect(fatal).toBeInstanceOf(LoopBlockError); expect(fatal.fatal).toBe(true)
+  })
+
+  it('gives a fresh corrective chance after other work breaks the streak', async () => {
+    const built = buildMiddlewarePipeline({ plan: { enabled: false }, loopDetection: { warnAfter: 2, stopAfter: 3 } }, undefined, prompt)
+    const state = checkpoint()
+    const search = (id: string) => built.pipeline.beforeTool({ checkpoint: state, call: { id, name: 'search', arguments: { query: 'same' } } })
+    const edit = (id: string) => built.pipeline.beforeTool({ checkpoint: state, call: { id, name: 'edit', arguments: { file: 'a.ts' } } })
+    await search('1'); await search('2')
+    const first = await search('3').then(() => { throw new Error('expected a block') }, error => error as LoopBlockError)
+    expect(first.fatal).toBe(false)
+    await edit('4')
+    await search('again-1'); await search('again-2')
+    const second = await search('again-3').then(() => { throw new Error('expected a block') }, error => error as LoopBlockError)
+    expect(second.fatal).toBe(false)
   })
 })

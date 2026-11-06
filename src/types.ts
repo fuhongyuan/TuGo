@@ -72,11 +72,14 @@ export type DslSource = {
   updatedAt: string
 }
 
+export type PresentationArea = { id: string; name: string; bounds: { x: number; y: number; width: number; height: number } }
+
 export type BoardDocument = {
   version: 1 | 2 | 3
   elements: BoardElement[]
   edges: BoardEdge[]
   paletteId?: string
+  presentationAreas?: PresentationArea[]
   dsl?: DslSource
   viewport: { x: number; y: number; zoom: number }
 }

@@ -1,7 +1,7 @@
 {
   "name": "tugo",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "TuGo AI infinite canvas",
   "license": "Apache-2.0",
   "packageManager": "npm@11.6.2",
@@ -11,15 +11,21 @@
   },
   "type": "module",
   "main": "electron/main.cjs",
+  "bin": {
+    "tugo": "cli/tugo.cjs"
+  },
   "scripts": {
     "dev": "node scripts/electron-dev.mjs",
     "dev:web": "vite --host 127.0.0.1 --port 5189 --strictPort",
-    "build": "tsc -b && npm run runtime:ts:build && vite build",
+    "build": "vite-node scripts/generate-cli-validator.mts && tsc -b && npm run runtime:ts:build && vite build",
     "test": "vitest run",
     "test:runtime": "npm run test:runtime:ts",
     "test:runtime:ts": "vitest run runtime-ts/tests",
     "test:electron": "npm run build && node scripts/electron-e2e.mjs",
     "test:ui": "npm run test:electron",
+    "test:canvas": "node scripts/canvas-interactions.mjs",
+    "test:seam": "node scripts/seam-regression.mjs && vite-node scripts/cooperative-parity.mts && vitest run src/lib/seamRegression.test.ts src/lib/edgeRoute.test.ts src/lib/canvasGeometry.test.ts src/lib/exportDocument.test.ts src/lib/diagramQuality.test.ts && node scripts/seam-canvas.mjs",
+    "test:cli": "node --test scripts/cli-server-check.cjs && node scripts/cli-e2e.mjs",
     "test:electron:packaged": "TUGO_E2E_EXECUTABLE=release/mac-arm64/TuGo.app/Contents/MacOS/TuGo node scripts/electron-e2e.mjs",
     "test:electron:soak": "node scripts/electron-soak.mjs",
     "test:visual": "vite-node scripts/visual-export.mts",
@@ -41,8 +47,10 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ajv": "^8.20.0",
+    "js-tiktoken": "1.0.21",
     "jszip": "^3.10.1",
-    "pdfjs-dist": "^5.4.149",
+    "pdfjs-dist": "^6.5.438",
+    "proper-lockfile": "4.1.2",
     "sql.js": "^1.13.0",
     "undici": "^7.29.0"
   },
@@ -51,20 +59,37 @@
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "@types/sql.js": "^1.4.9",
-    "@vitejs/plugin-react": "^4.3.4",
-    "electron": "43.4.0",
-    "electron-builder": "26.15.3",
+    "@vitejs/plugin-react": "^6.2.1",
+    "dagre-d3-es": "7.0.14",
+    "dompurify": "^3.4.17",
+    "electron": "43.8.6",
+    "electron-builder": "26.18.0",
+    "esbuild": "^0.28.2",
+    "image-size": "^2.0.4",
     "jsdom": "^26.0.0",
     "jspdf": "^4.2.1",
     "lucide-react": "^0.468.0",
-    "mermaid": "^11.16.1",
+    "mermaid": "^12.2.0",
     "pptxgenjs": "^4.0.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "typescript": "~5.7.2",
-    "vite": "^6.0.5",
-    "vitest": "^3.0.5"
+    "vite": "^8.3.5",
+    "vite-node": "^6.0.0",
+    "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "pptxgenjs": {
+      "image-size": "^2.0.4"
+    },
+    "@electron/asar": {
+      ".": "^4.3.1",
+      "glob": "^14.0.3"
+    },
+    "@electron/universal": "^3.0.6",
+    "ejs": "^7.0.2",
+    "minimatch": "^11.0.2"
   }
 }

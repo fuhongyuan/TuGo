@@ -5,6 +5,15 @@ import { emptyDocument } from '../types'
 const node = { id: 'a', kind: 'rectangle' as const, x: 0, y: 0, width: 100, height: 60, text: 'A', fill: '#fff', stroke: '#000', strokeWidth: 1, fontSize: 16 }
 
 describe('board state operations', () => {
+  it('undoes document edits without undoing the user camera', () => {
+    let history = commit({ current: emptyDocument(), past: [], future: [] }, [{ op: 'add_element', element: node }])
+    const viewport = { x: 250, y: -80, zoom: 1.7 }
+    history = { ...history, current: { ...history.current, viewport } }
+    const reverted = undo(history)
+    expect(reverted.current.elements).toHaveLength(0)
+    expect(reverted.current.viewport).toEqual(viewport)
+    expect(redo(reverted).current.viewport).toEqual(viewport)
+  })
   it('applies element and edge operations atomically', () => {
     const result = applyBoardOperations(emptyDocument(), [
       { op: 'add_element', element: node },
@@ -87,6 +96,16 @@ describe('board state operations', () => {
   it('persists a loose multi-segment line without requiring shape endpoints', () => {
     const result = applyBoardOperations(emptyDocument(), [{ op: 'add_edge', edge: { id: 'loose', from: '', to: '', freeStart: { x: 20, y: 30 }, freeEnd: { x: 260, y: 170 }, controlPoints: [{ x: 110, y: 30 }, { x: 110, y: 120 }], routing: 'polyline', stroke: '#000', strokeWidth: 2 } }])
     expect(result.edges[0]).toMatchObject({ routing: 'polyline', freeStart: { x: 20, y: 30 }, freeEnd: { x: 260, y: 170 }, controlPoints: [{ x: 110, y: 30 }, { x: 110, y: 120 }] })
+  })
+
+  it('keeps a detached endpoint at the user-selected free position', () => {
+    const seeded = applyBoardOperations(emptyDocument(), [
+      { op: 'add_element', element: node },
+      { op: 'add_element', element: { ...node, id: 'b', x: 0, y: 360 } },
+      { op: 'add_edge', edge: { id: 'e', from: 'a', to: 'b', stroke: '#000', strokeWidth: 2, routing: 'straight' } },
+    ])
+    const result = applyBoardOperations(seeded, [{ op: 'patch_edge', id: 'e', patch: { to: '', toAnchor: undefined, freeEnd: { x: 50, y: 180 } } }])
+    expect(result.edges[0]).toMatchObject({ from: 'a', to: '', freeEnd: { x: 50, y: 180 } })
   })
 
   it('unlocks legacy Mermaid subgraph frames when loading saved boards', () => {

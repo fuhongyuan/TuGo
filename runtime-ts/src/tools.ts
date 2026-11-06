@@ -1,3 +1,4 @@
+import type {AttemptContext} from './toolExecutor.js'
 import AjvModule, { type ValidateFunction } from 'ajv'
 import { isIP } from 'node:net'
 import { lookup } from 'node:dns/promises'
@@ -103,25 +104,22 @@ export const searchWeb = async (query: string, count: number, signal: AbortSigna
   throw new Error(`Web search unavailable (${failures.join('; ')})`)
 }
 
-export type HostToolBridge = (name: string, args: JsonObject, context: JsonObject, signal: AbortSignal, timeoutMs: number) => Promise<unknown>
-
-export type ToolErrorCategory = 'validation' | 'timeout' | 'unavailable' | 'execution'
-
-// Tool failures are part of the Agent protocol, not just display strings.
-// Keeping the category on the Error lets Runtime offer a bounded correction
-// only for malformed arguments, while a timeout or unavailable renderer ends
-// predictably instead of burning model loops on a retry that cannot work.
-export class ToolExecutionError extends Error {
-  constructor(message: string, readonly category: ToolErrorCategory, readonly repairable = false) {
-    super(message)
-    this.name = 'ToolExecutionError'
-  }
-}
+import type {HostToolBridge} from './runtimeApplication.js'
+import {ToolExecutionError} from './toolErrors.js'
+export type {HostToolBridge} from './runtimeApplication.js'
+export {ToolExecutionError,type ToolErrorCategory} from './toolErrors.js'
 
 export class ToolRegistry {
   private ajv = new (AjvModule as unknown as new (options?: JsonObject) => { compile(schema: JsonObject): ValidateFunction; errorsText(errors?: unknown, options?: JsonObject): string })({ allErrors: true, strict: false })
   private validators = new Map<string, ValidateFunction>()
   constructor(private repository: RuntimeRepository, private mcp: McpManager, private bridge: HostToolBridge) {}
+
+  async observe(checkpoint: RunCheckpoint, signal: AbortSignal, observationId?: string): Promise<JsonObject> {
+    if (!checkpoint.projectId) throw new Error('观察缺少会话绑定画板')
+    const result = objectArg(await this.bridge(observationId ? 'board_get_observation' : 'board_observe', {project_id:checkpoint.projectId,...(observationId?{observation_id:observationId}:{wait_ms:1200})}, {project_id:checkpoint.projectId,conversation_id:checkpoint.conversationId,thread_id:checkpoint.threadId,run_id:checkpoint.runId,tool_timeout_ms:8000}, signal,8000))
+    if (!objectArg(result.observation).observation_id) throw new Error('观察服务没有返回有效证据')
+    return result
+  }
 
   async resolve(agentId: string) {
     const builtin = this.repository.toolsForAgent(agentId)
@@ -262,7 +260,8 @@ export class ToolRegistry {
     })
     return JSON.parse(JSON.stringify({ ...candidate, operations: cleanOperations })) as JsonObject
   }
-  async execute(tool: ToolDefinition, args: JsonObject, checkpoint: RunCheckpoint, signal: AbortSignal, options: { repair?: boolean } = {}): Promise<unknown> {
+  async execute(tool: ToolDefinition, args: JsonObject, checkpoint: RunCheckpoint, signal: AbortSignal, options: { repair?: boolean;execution?:AttemptContext } = {}): Promise<unknown> {
+    if(signal.aborted)throw new DOMException('Cancelled','AbortError')
     const controller = new AbortController()
     const timeoutMs = Math.max(1, Number(tool.timeoutMs || 30_000))
     let rejectBoundary!: (error: Error) => void
@@ -277,7 +276,7 @@ export class ToolRegistry {
       signal.removeEventListener('abort', abort)
     }
   }
-  private async executeInternal(tool: ToolDefinition, args: JsonObject, checkpoint: RunCheckpoint, signal: AbortSignal, options: { repair?: boolean } = {}): Promise<unknown> {
+  private async executeInternal(tool: ToolDefinition, args: JsonObject, checkpoint: RunCheckpoint, signal: AbortSignal, options: { repair?: boolean;execution?:AttemptContext } = {}): Promise<unknown> {
     if (options.repair !== false) args = this.normalizeArguments(tool, args)
     // project_id used to be part of the public model schema. Accept it from
     // historical checkpoints, but never let it choose a board: the thread is
@@ -307,7 +306,7 @@ export class ToolRegistry {
       if (!checkpoint.projectId) throw new Error('当前会话未绑定画板，无法执行画板操作')
       // The renderer bridge still receives the ID because it needs to locate
       // state, but it is injected here rather than model-controlled.
-      return this.bridge(tool.name, { ...executionArgs, project_id: checkpoint.projectId }, { project_id: checkpoint.projectId, conversation_id: checkpoint.conversationId, thread_id: checkpoint.threadId, run_id: checkpoint.runId, tool_timeout_ms: tool.timeoutMs }, signal, tool.timeoutMs)
+      return this.bridge(tool.name, { ...executionArgs, project_id: checkpoint.projectId }, { project_id: checkpoint.projectId, conversation_id: checkpoint.conversationId, thread_id: checkpoint.threadId, run_id: checkpoint.runId, execution_call_id:options.execution?.callId, execution_attempt_id:options.execution?.attemptId, tool_timeout_ms: tool.timeoutMs }, signal, tool.timeoutMs)
     }
     if (tool.handlerKey === 'plan') { checkpoint.plan = normalizePlan(executionArgs, checkpoint.plan); return { ok: true, plan: checkpoint.plan } }
     if (tool.handlerKey === 'diagram-quality') {
@@ -330,8 +329,22 @@ export class ToolRegistry {
       if (tool.name === 'diagram_acceptance_check') {
         const brief = quality.brief as DiagramBrief | undefined
         const contentReview = quality.contentReview as ContentReview | undefined
-        const acceptance = buildAcceptanceReport({ brief, contentReview, layoutReview: objectArg(executionArgs.layout_review), visualReview: objectArg(executionArgs.visual_review), requireVisualReview: executionArgs.require_visual_review === true })
-        checkpoint.middlewareState = { ...middlewareState, diagramQuality: { ...quality, layoutReview: executionArgs.layout_review, visualReview: executionArgs.visual_review, acceptance, stage: acceptance.stage } }
+        // Never accept a model-authored {status:'passed'} as renderer evidence.
+        const observationId = String(executionArgs.observation_id || '')
+        let observed: JsonObject = {}
+        if (observationId) {
+          try { observed = objectArg((await this.observe(checkpoint,signal,observationId)).observation) }
+          catch { observed = {} }
+        }
+        const trusted = observed.project_id === checkpoint.projectId && observed.observation_id === observationId && observed.verdict !== 'stale' && Boolean(observed.renderer_fingerprint)
+        const layoutReview = trusted ? {checked:true,issues:(Array.isArray(observed.findings)?observed.findings:[]).map(raw=>{const item=objectArg(raw);return {type:item.type,severity:item.severity==='blocking'?'high':'medium',message:item.message,ids:item.refs}})} : {checked:false}
+        const acceptance = buildAcceptanceReport({ brief, contentReview, layoutReview, requireVisualReview:false })
+        if (!trusted || objectArg(observed.checks).render !== 'passed') acceptance.blocking.push({code:'acceptance.observation_unverified',severity:'blocking',message:'缺少当前画板的有效真实渲染观察。请调用 board_observe，并传回 observation_id；不要重放已经提交的写操作。'})
+        if (Number(observed.blocking_count || 0)>0 && !acceptance.blocking.length) acceptance.blocking.push({code:'acceptance.remaining_blockers',severity:'blocking',message:'完整观察中仍有阻断项，摘要不能替代完整问题清单。'})
+        if (executionArgs.require_visual_review === true) acceptance.blocking.push({code:'acceptance.pixel_review_unverified',severity:'blocking',message:'当前证据仅支持几何/DOM检查，尚无可信像素或外部查看器验收；模型自报 passed 不作为证据。'})
+        acceptance.warnings.push({code:'acceptance.target_scope',severity:'warning',message:'此验收仅覆盖当前画板几何、DOM与绘制顺序；参考图语义、像素级显示和外部PPT渲染未验证。'})
+        acceptance.passed=acceptance.blocking.length===0;acceptance.stage=acceptance.passed?'accepted':'blocked';acceptance.summary=acceptance.passed?'当前画板几何与DOM验收通过；保留证据覆盖范围提示。':`验收未通过：${acceptance.blocking.length} 个阻断问题。`
+        checkpoint.middlewareState = { ...middlewareState, diagramQuality: { ...quality, layoutReview, observationId:trusted?observationId:null, acceptance, stage: acceptance.stage } }
         return { ok: true, acceptance }
       }
       throw new Error(`Unknown diagram quality tool: ${tool.name}`)

@@ -1,7 +1,12 @@
+import { layoutNodeText } from './textLayout'
+import {sceneObstacles} from './sceneObstacles'
+import { elementLayers } from './boardCommands'
+import { documentEdgeRoutes, resolveEdgeRoute, routePath } from './edgeRoute'
 import PptxGenJS from 'pptxgenjs'
 import { jsPDF } from 'jspdf'
 import type { BoardDocument, BoardEdge, BoardElement, ElementKind } from '../types'
-import { resolvedEdgeAnchor } from './edgeGeometry'
+import { edgeLabelLines, placeEdgeLabel, type CanvasRect } from './canvasGeometry'
+import { edgeDefaults } from './canvasStyle'
 
 export type ExportRegion = { x: number; y: number; width: number; height: number }
 export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'svg' | 'pdf' | 'pptx' | 'drawio'
@@ -26,16 +31,6 @@ export function documentForRegion(document: BoardDocument, region: ExportRegion)
   return { ...document, elements, edges: document.edges.filter(edge => (ids.has(edge.from) || edge.freeStart) && (ids.has(edge.to) || edge.freeEnd)), viewport: { x: 0, y: 0, zoom: 1 } }
 }
 
-const edgePath = (edge: BoardEdge, from: BoardElement | undefined, to: BoardElement | undefined, region: ExportRegion) => {
-  const start = from ? resolvedEdgeAnchor(from, to ? { x: to.x + to.width / 2, y: to.y + to.height / 2 } : edge.freeEnd!, edge.fromAnchor) : edge.freeStart!
-  const finish = to ? resolvedEdgeAnchor(to, from ? { x: from.x + from.width / 2, y: from.y + from.height / 2 } : edge.freeStart!, edge.toAnchor) : edge.freeEnd!
-  const x1 = start.x - region.x; const y1 = start.y - region.y
-  const x2 = finish.x - region.x; const y2 = finish.y - region.y
-  if (edge.routing === 'elbow') return `M ${x1} ${y1} L ${(x1 + x2) / 2} ${y1} L ${(x1 + x2) / 2} ${y2} L ${x2} ${y2}`
-  if (edge.routing === 'polyline') return `M ${x1} ${y1}${(edge.controlPoints || []).map(point => ` L ${point.x - region.x} ${point.y - region.y}`).join('')} L ${x2} ${y2}`
-  if (edge.routing === 'curve') return `M ${x1} ${y1} C ${(x1 + x2) / 2} ${y1}, ${(x1 + x2) / 2} ${y2}, ${x2} ${y2}`
-  return `M ${x1} ${y1} L ${x2} ${y2}`
-}
 
 const shapeSvg = (item: BoardElement) => {
   const w = item.width; const h = item.height
@@ -50,19 +45,38 @@ const shapeSvg = (item: BoardElement) => {
 }
 
 const textSvg = (item: BoardElement) => {
-  const lines = String(item.text || '').split(/\n/)
-  const lineHeight = item.fontSize * 1.25
-  const startY = item.height / 2 - ((lines.length - 1) * lineHeight) / 2
+  const { lines, fontSize, lineHeight } = layoutNodeText(item)
+  const startY = item.verticalAlign === 'top' ? 10 + lineHeight / 2 : item.verticalAlign === 'bottom' ? item.height - 10 - (lines.length - .5) * lineHeight : item.height / 2 - ((lines.length - 1) * lineHeight) / 2
   const anchor = item.textAlign === 'left' ? 'start' : item.textAlign === 'right' ? 'end' : 'middle'
   const x = item.textAlign === 'left' ? 10 : item.textAlign === 'right' ? item.width - 10 : item.width / 2
-  return `<text x="${x}" y="${startY}" text-anchor="${anchor}" dominant-baseline="middle" fill="${xml(item.textColor || '#263145')}" font-family="${xml(item.fontFamily || 'Arial')}" font-size="${item.fontSize}" font-weight="${item.fontWeight === 'bold' ? 700 : 400}" font-style="${item.fontStyle || 'normal'}">${lines.map((line, index) => `<tspan x="${x}" dy="${index ? lineHeight : 0}">${xml(line)}</tspan>`).join('')}</text>`
+  // Shape paint is inherited through the parent group. Text needs independent
+  // paint, while the group's overall opacity must still apply to the object.
+  return `<text x="${x}" y="${startY}" text-anchor="${anchor}" dominant-baseline="middle" fill="${xml(item.textColor || '#263145')}" fill-opacity="1" stroke="none" stroke-width="0" stroke-dasharray="none" font-family="${xml(item.fontFamily || 'Arial')}" font-size="${fontSize}" font-weight="${item.fontWeight === 'bold' ? 700 : 400}" font-style="${item.fontStyle || 'normal'}">${lines.map((line, index) => `<tspan x="${x}" dy="${index ? lineHeight : 0}">${xml(line)}</tspan>`).join('')}</text>`
 }
 
 export function renderRegionSvg(document: BoardDocument, region: ExportRegion, transparent = false) {
   const clipped = documentForRegion(document, region)
+  const routes = documentEdgeRoutes(document.elements, document.edges)
+  const obstacles = sceneObstacles(document.elements)
+  const occupied: CanvasRect[] = []
+  const labels = [...clipped.edges].sort((a,b) => (a.zIndex ?? 0) - (b.zIndex ?? 0)).filter(edge => edge.label).map(edge => {
+    const points = routes.get(edge.id)?.pathPoints || []
+    if (!points.length) return ''
+    const center = placeEdgeLabel(points, edge.label || '', obstacles, occupied), lines = edgeLabelLines(edge.label || '')
+    occupied.push({x: center.x-center.width/2, y:center.y-center.height/2, width:center.width, height:center.height})
+    return `<rect x="${center.x-region.x-center.width/2}" y="${center.y-region.y-center.height/2}" width="${center.width}" height="${center.height}" rx="6" fill="white" stroke="#dbe0e8"/><text x="${center.x - region.x}" y="${center.y - region.y - (lines.length - 1) * 9}" text-anchor="middle" dominant-baseline="middle" font-family="Arial" font-size="13" fill="${xml(edge.stroke || '#64748b')}" stroke="white" stroke-width="5" stroke-linejoin="round" paint-order="stroke" opacity="${edge.opacity ?? 1}">${lines.map((line, index) => `<tspan x="${center.x - region.x}" y="${center.y - region.y - (lines.length - 1) * 9 + index * 18}">${xml(line)}</tspan>`).join('')}</text>`
+  }).join('')
+  return renderRegionSvgBase(document, region, transparent).replace('</g></svg>', `${labels}</g></svg>`)
+}
+
+function renderRegionSvgBase(document: BoardDocument, region: ExportRegion, transparent = false) {
+  const clipped = documentForRegion(document, region)
   const elements = [...clipped.elements].sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))
+  const routes = documentEdgeRoutes(document.elements, document.edges)
   const edges = [...clipped.edges].sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${region.width}" height="${region.height}" viewBox="0 0 ${region.width} ${region.height}"><defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="context-stroke" stroke-width="1.6"/></marker><marker id="triangle" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M1 1 L9 5 L1 9 Z" fill="context-stroke"/></marker><clipPath id="crop"><rect width="${region.width}" height="${region.height}"/></clipPath></defs>${transparent ? '' : `<rect width="100%" height="100%" fill="#ffffff"/>`}<g clip-path="url(#crop)">${edges.map(edge => { const from=clipped.elements.find(item=>item.id===edge.from);const to=clipped.elements.find(item=>item.id===edge.to);if((!from&&!edge.freeStart)||(!to&&!edge.freeEnd))return '';const dash=edge.strokeStyle==='dashed'?'10 7':edge.strokeStyle==='dotted'?'2 6':'';return `<path d="${edgePath(edge,from,to,region)}" fill="none" stroke="${xml(edge.stroke)}" stroke-width="${edge.strokeWidth}" ${dash?`stroke-dasharray="${dash}"`:''} opacity="${edge.opacity??1}" ${edge.endArrow&&edge.endArrow!=='none'?`marker-end="url(#${edge.endArrow==='triangle'?'triangle':'arrow'})"`:''}/>` }).join('')}${elements.map(item=>`<g transform="translate(${item.x-region.x} ${item.y-region.y}) rotate(${item.rotation||0} ${item.width/2} ${item.height/2})" fill="${xml(item.fill)}" fill-opacity="${item.fillOpacity??1}" stroke="${xml(item.stroke)}" stroke-width="${item.strokeWidth}" opacity="${item.opacity??1}" ${item.strokeStyle==='dashed'?'stroke-dasharray="10 7"':item.strokeStyle==='dotted'?'stroke-dasharray="2 6"':''}>${shapeSvg(item)}${textSvg(item)}</g>`).join('')}</g></svg>`
+  const renderElements = (elements: BoardElement[]) => elements.map(item=>`<g transform="translate(${item.x-region.x} ${item.y-region.y}) rotate(${item.rotation||0} ${item.width/2} ${item.height/2})" fill="${xml(item.fill)}" fill-opacity="${item.fillOpacity??1}" stroke="${xml(item.stroke)}" stroke-width="${item.strokeWidth}" opacity="${item.opacity??1}" ${item.strokeStyle==='dashed'?'stroke-dasharray="10 7"':item.strokeStyle==='dotted'?'stroke-dasharray="2 6"':''}>${shapeSvg(item)}${textSvg(item)}</g>`).join('')
+  const layers = elementLayers(elements)
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${region.width}" height="${region.height}" viewBox="0 0 ${region.width} ${region.height}"><defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M1 1 L9 5 L1 9" fill="none" stroke="context-stroke" stroke-width="1.6"/></marker><marker id="triangle" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M1 1 L9 5 L1 9 Z" fill="context-stroke"/></marker><marker id="circle" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><circle cx="5" cy="5" r="3.2" fill="context-stroke"/></marker><marker id="diamond" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M1 5 L5 1 L9 5 L5 9 Z" fill="context-stroke"/></marker><clipPath id="crop"><rect width="${region.width}" height="${region.height}"/></clipPath></defs>${transparent ? '' : `<rect width="100%" height="100%" fill="#ffffff"/>`}<g clip-path="url(#crop)">${renderElements(layers.background)}${edges.map(edge => { const from=clipped.elements.find(item=>item.id===edge.from);const to=clipped.elements.find(item=>item.id===edge.to);if((!from&&!edge.freeStart)||(!to&&!edge.freeEnd))return '';const style=edgeDefaults(edge);const dash=style.strokeStyle==='dashed'?'10 7':style.strokeStyle==='dotted'?'2 6':'';return `<path d="${(() => { const r = routes.get(edge.id)!; const shift = (p: PptPoint) => ({ x: p.x - region.x, y: p.y - region.y }); return routePath(r.routing, shift(r.start), shift(r.end), r.points.map(shift)) })()}" fill="none" stroke="${xml(edge.stroke)}" stroke-width="${edge.strokeWidth}" ${dash?`stroke-dasharray="${dash}"`:''} opacity="${style.opacity}" ${style.startArrow!=='none'?`marker-start="url(#${style.startArrow})"`:''} ${style.endArrow&&style.endArrow!=='none'?`marker-end="url(#${style.endArrow})"`:''}/>` }).join('')}${renderElements(layers.foreground)}</g></svg>`
 }
 
 async function svgToBlob(svg: string, width: number, height: number, mime: 'image/png'|'image/jpeg'|'image/webp', scale: number, transparent: boolean) {
@@ -131,43 +145,11 @@ function boundaryPoint(item: BoardElement, toward: PptPoint, pos: (item: BoardEl
   return { x: cx + dx * scale, y: cy + dy * scale }
 }
 
-const finitePoints = (value: BoardEdge['controlPoints']) => Array.isArray(value) ? value.filter(point => Number.isFinite(point?.x) && Number.isFinite(point?.y)) : []
-const quadratic = (a: PptPoint, control: PptPoint, b: PptPoint, slices = 12) => Array.from({ length: slices + 1 }, (_, index) => {
-  const t = index / slices; const u = 1 - t
-  return { x: u * u * a.x + 2 * u * t * control.x + t * t * b.x, y: u * u * a.y + 2 * u * t * control.y + t * t * b.y }
-})
-// This is the single canvas-path translation used for editable PPT lines.
-// It mirrors InfiniteCanvas: endpoints are anchored using the opposite node's
-// centre, elbow/curve control points are preserved, and a curve is the same
-// quadratic Bézier sampled into safe native PPT line segments.
 function canvasRoutePoints(edge: BoardEdge, from?: BoardElement, to?: BoardElement): PptPoint[] {
-  // A free endpoint is a first-class canvas line, not an incomplete connector.
-  // Keep the export route in the same coordinate model as SVG/InfiniteCanvas so
-  // free and mixed edges survive the editable PPTX translation.
-  if ((!from && !edge.freeStart) || (!to && !edge.freeEnd)) return []
-  const toCenter = to ? { x: to.x + to.width / 2, y: to.y + to.height / 2 } : edge.freeEnd!
-  const fromCenter = from ? { x: from.x + from.width / 2, y: from.y + from.height / 2 } : edge.freeStart!
-  // Keep routing math in board coordinates until the route is complete. The
-  // old export mixed scaled PowerPoint points with the canvas default `-50`,
-  // effectively treating it as *50 inches*. That is the root cause of the
-  // huge arcs/vertical lines seen in exported decks.
-  const start = from ? resolvedEdgeAnchor(from, toCenter, edge.fromAnchor) : edge.freeStart!
-  const end = to ? resolvedEdgeAnchor(to, fromCenter, edge.toAnchor) : edge.freeEnd!
-  const control = finitePoints(edge.controlPoints)
-  const routing = edge.routing || 'curve'
-  if (routing === 'straight') return [start, end]
-  if (routing === 'elbow') {
-    const first = control[0] || { x: (start.x + end.x) / 2, y: start.y }
-    const second = control[1] || { x: first.x, y: end.y }
-    return [start, first, second, end]
-  }
-  const curveControl = control[0] || { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 - 50 }
-  return quadratic(start, curveControl, end)
+  return resolveEdgeRoute(edge, [from, to].filter((item): item is BoardElement => Boolean(item)))?.pathPoints || []
 }
 
-function pptRoutePoints(edge: BoardEdge, from: BoardElement | undefined, to: BoardElement | undefined, point: (value: PptPoint) => PptPoint) {
-  return canvasRoutePoints(edge, from, to).map(point)
-}
+
 
 const arrow = (value: BoardEdge['startArrow']): PptxGenJS.ShapeLineProps['beginArrowType'] | undefined => {
   if (!value || value === 'none') return undefined
@@ -210,12 +192,12 @@ function addPptLine(slide: PptxGenJS.Slide, pptx: PptxGenJS, a: PptPoint, b: Ppt
 const pptPoints = (boardPixels: number, scale: number, minimum = 0) => Math.max(minimum, boardPixels * scale * 72)
 const pptLine = (boardPixels: number, scale: number) => pptPoints(boardPixels, scale, .25)
 const pptTextBox = (item: BoardElement, p: { x: number; y: number; w: number; h: number }, scale: number) => {
-  const horizontalInset = 8 * scale; const verticalInset = 6 * scale
+  const horizontalInset = 12 * scale; const verticalInset = 4 * scale
   return {
     x: p.x + horizontalInset, y: p.y + verticalInset,
     w: Math.max(.01, p.w - horizontalInset * 2), h: Math.max(.01, p.h - verticalInset * 2),
     margin: 0, rotate: item.rotation || 0, fontFace: item.fontFamily || 'Arial',
-    fontSize: pptPoints(item.fontSize, scale, 4.5), bold: item.fontWeight === 'bold', italic: item.fontStyle === 'italic',
+    fontSize: pptPoints(layoutNodeText(item).fontSize, scale, 4.5), bold: item.fontWeight === 'bold', italic: item.fontStyle === 'italic',
     underline: item.textDecoration === 'underline' ? { color: color(item.textColor) } : undefined,
     color: color(item.textColor, '263145'), align: item.textAlign || 'center',
     valign: (item.verticalAlign === 'top' ? 'top' : item.verticalAlign === 'bottom' ? 'bottom' : 'middle') as 'top' | 'bottom' | 'middle',
@@ -252,24 +234,11 @@ function appendRegionPptx(pptx: PptxGenJS, document: BoardDocument, region: Expo
   const margin=.28, availableW=13.333-margin*2, availableH=7.5-margin*2, scale=Math.min(availableW/frame.width,availableH/frame.height), offsetX=(13.333-frame.width*scale)/2, offsetY=(7.5-frame.height*scale)/2
   const pos=(item:BoardElement)=>({x:offsetX+(item.x-frame.x)*scale,y:offsetY+(item.y-frame.y)*scale,w:item.width*scale,h:item.height*scale})
   const point = (value: PptPoint): PptPoint => ({ x: offsetX + (value.x - frame.x) * scale, y: offsetY + (value.y - frame.y) * scale })
-  for (const edge of [...clipped.edges].sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))) {
-    const from = clipped.elements.find(item => item.id === edge.from); const to = clipped.elements.find(item => item.id === edge.to)
-    if ((!from && !edge.freeStart) || (!to && !edge.freeEnd)) continue
-    const line = { color: color(edge.stroke), width: pptLine(edge.strokeWidth, scale), dashType: edge.strokeStyle === 'dashed' ? 'dash' as const : edge.strokeStyle === 'dotted' ? 'sysDot' as const : 'solid' as const, transparency: Math.round((1 - (edge.opacity ?? 1)) * 100) }
-    const points = pptRoutePoints(edge, from, to, point)
-    if (points.length < 2) continue
-    const startArrow = edge.startArrow || (edge.arrowStart ? 'arrow' : 'none')
-    const endArrow = edge.endArrow || (edge.arrowEnd ? 'arrow' : 'none')
-    for (let index = 0; index < points.length - 1; index += 1) addPptLine(slide, pptx, points[index], points[index + 1], line, index === 0 ? arrow(startArrow) : undefined, index === points.length - 2 ? arrow(endArrow) : undefined)
-    if (edge.label) { const label = routeMidpoint(points); const boxW = Math.max(.35, 92 * scale); const boxH = Math.max(.16, 24 * scale); slide.addText(edge.label, { x: label.x - boxW / 2, y: label.y - boxH / 2, w: boxW, h: boxH, margin: 0, fontFace: 'Arial', fontSize: pptPoints(13, scale, 4.5), color: color(edge.stroke), align: 'center', valign: 'middle', fit: 'shrink' }) }
-  }
-  const elements = [...clipped.elements].sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))
-  // The canvas keeps labels above cards and coloured ranges. PPT previously
-  // emitted every item atomically, allowing a late background rectangle to
-  // cover labels that had already been emitted. Keep geometry and text as two
-  // editable layers, matching the whiteboard painter model.
-  for (const item of elements) {
-    if (!hasVisibleGeometry(item)) continue
+  // PowerPoint uses insertion order as z-order: backgrounds, connectors,
+  // foreground cards, then connector labels (the same order as the canvas).
+  const layers = elementLayers(clipped.elements)
+  const addGeometry = (item: BoardElement) => {
+    if (!hasVisibleGeometry(item)) return
     const p = pos(item)
     const line = { color: color(item.stroke), width: pptLine(item.strokeWidth, scale), dashType: item.strokeStyle === 'dashed' ? 'dash' as const : item.strokeStyle === 'dotted' ? 'sysDot' as const : 'solid' as const, transparency: Math.round((1 - (item.opacity ?? 1)) * 100) }
     if (item.kind === 'actor') {
@@ -279,7 +248,34 @@ function appendRegionPptx(pptx: PptxGenJS, document: BoardDocument, region: Expo
       for (const segment of [[cx, bodyTop, cx, hip], [p.x + p.w * .2, p.y + p.h * .42, p.x + p.w * .8, p.y + p.h * .42], [cx, hip, p.x + p.w * .22, p.y + p.h * .96], [cx, hip, p.x + p.w * .78, p.y + p.h * .96]]) slide.addShape(pptx.ShapeType.line, { x: segment[0], y: segment[1], w: segment[2] - segment[0], h: segment[3] - segment[1], line })
     } else slide.addShape(pptShape(item.kind, pptx), { ...p, rotate: item.rotation || 0, fill: { color: color(item.fill, 'FFFFFF'), transparency: Math.round((1 - (item.fillOpacity ?? 1)) * 100) }, line })
   }
-  for (const item of elements) if (item.text) slide.addText(item.text, pptTextBox(item, pos(item), scale))
+  for (const item of layers.background) {
+    addGeometry(item)
+    if (item.text) slide.addText(layoutNodeText(item).lines.join('\n'), pptTextBox(item, pos(item), scale))
+  }
+  const labels: Array<() => void> = []
+  const exportRoutes = documentEdgeRoutes(document.elements, document.edges)
+  const labelObstacles = sceneObstacles(document.elements)
+  const occupiedLabels: CanvasRect[] = []
+  for (const edge of [...clipped.edges].sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))) {
+    const from = clipped.elements.find(item => item.id === edge.from); const to = clipped.elements.find(item => item.id === edge.to)
+    if ((!from && !edge.freeStart) || (!to && !edge.freeEnd)) continue
+    const line = { color: color(edge.stroke), width: pptLine(edge.strokeWidth, scale), dashType: edge.strokeStyle === 'dashed' ? 'dash' as const : edge.strokeStyle === 'dotted' ? 'sysDot' as const : 'solid' as const, transparency: Math.round((1 - (edge.opacity ?? 1)) * 100) }
+    const points = (exportRoutes.get(edge.id)?.pathPoints || []).map(point)
+    if (points.length < 2) continue
+    const startArrow = edge.startArrow || (edge.arrowStart ? 'arrow' : 'none')
+    const endArrow = edge.endArrow || (edge.arrowEnd ? 'arrow' : 'none')
+    for (let index = 0; index < points.length - 1; index += 1) addPptLine(slide, pptx, points[index], points[index + 1], line, index === 0 ? arrow(startArrow) : undefined, index === points.length - 2 ? arrow(endArrow) : undefined)
+    if (edge.label) {
+      const placement = placeEdgeLabel(exportRoutes.get(edge.id)!.pathPoints, edge.label, labelObstacles, occupiedLabels)
+      occupiedLabels.push({x:placement.x-placement.width/2,y:placement.y-placement.height/2,width:placement.width,height:placement.height})
+      const label = point(placement), boxW = placement.width * scale, boxH = placement.height * scale
+      labels.push(() => slide.addText(edge.label!, { x: label.x-boxW/2, y:label.y-boxH/2,w:boxW,h:boxH,margin:0,fill:{color:'FFFFFF'},fontFace:'Arial',fontSize:pptPoints(13,scale,4.5),color:color(edge.stroke),align:'center',valign:'middle',fit:'shrink' }))
+    }
+  }
+  for (const item of layers.foreground) addGeometry(item)
+  for (const item of layers.foreground) if (item.text) slide.addText(layoutNodeText(item).lines.join('\n'), pptTextBox(item, pos(item), scale))
+  for (const addLabel of labels) addLabel()
+
 }
 
 function createPptx(fileName: string) { const pptx = new PptxGenJS(); pptx.layout = 'LAYOUT_WIDE'; pptx.author = 'TuGo'; pptx.subject = 'TuGo editable canvas export'; pptx.title = fileName; return pptx }
@@ -305,6 +301,31 @@ export async function buildRegionsPptxBase64(document: BoardDocument, regions: E
 
 async function exportPptx(document: BoardDocument, region: ExportRegion, fileName: string) {
   await buildRegionPptx(document,region,fileName).writeFile({ fileName: `${safeName(fileName)}.pptx`, compression: true })
+}
+
+export async function exportBoardFile(document: BoardDocument, format: string, requestedRegion: unknown, name: string) {
+  if (!['svg','drawio','png','jpeg','webp','pdf','pptx'].includes(format)) throw new Error('不支持的导出格式')
+  const items = document.elements
+  const routes = document.edges.flatMap(edge => canvasRoutePoints(edge, items.find(item => item.id === edge.from), items.find(item => item.id === edge.to)))
+  const left = [...items.map(item => item.x), ...routes.map(point => point.x)]
+  const top = [...items.map(item => item.y), ...routes.map(point => point.y)]
+  const x = (left.length ? Math.min(...left) : 0) - 32, y = (top.length ? Math.min(...top) : 0) - 32
+  const right = Math.max(x + 236, ...items.map(item => item.x + item.width), ...routes.map(point => point.x))
+  const bottom = Math.max(y + 136, ...items.map(item => item.y + item.height), ...routes.map(point => point.y))
+  const region = (requestedRegion || { x, y, width: right - x + 32, height: bottom - y + 32 }) as ExportRegion
+  if (![region.x,region.y,region.width,region.height].every(Number.isFinite) || region.width <= 0 || region.height <= 0 || region.width > 16000 || region.height > 16000 || region.width * region.height > 40_000_000) throw new Error('导出范围无效或过大，请通过 region 指定较小范围')
+  if (format === 'svg') return { file: { encoding: 'utf8', data: renderRegionSvg(document, region) } }
+  if (format === 'drawio') return { file: { encoding: 'utf8', data: toDrawIoXml(document, region) } }
+  if (format === 'pptx') return { file: { encoding: 'base64', data: await buildRegionsPptxBase64(document, [region], name) } }
+  const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png'
+  const blob = await svgToBlob(renderRegionSvg(document, region), region.width, region.height, mime, 1, false)
+  const dataUrl = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsDataURL(blob) })
+  if (format === 'pdf') {
+    const pdf = new jsPDF({ orientation: region.width >= region.height ? 'landscape' : 'portrait', unit: 'pt', format: [region.width, region.height] })
+    pdf.addImage(dataUrl, 'PNG', 0, 0, region.width, region.height)
+    return { file: { encoding: 'base64', data: pdf.output('datauristring').split(',')[1] } }
+  }
+  return { file: { encoding: 'base64', data: dataUrl.split(',')[1] } }
 }
 
 export async function exportRegion(document: BoardDocument, region: ExportRegion, fileName: string, options: ExportOptions) {

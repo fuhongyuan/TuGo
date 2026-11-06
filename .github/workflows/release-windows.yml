@@ -1,0 +1,51 @@
+name: Windows release package
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft release tag to build and upload
+        required: true
+        default: v1.1.0
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 25.2.1
+          cache: npm
+      - run: npm ci
+      - run: npx install-electron
+      - run: npm run build
+      - run: npm test -- --run
+      - name: Build x64 NSIS installer
+        run: node scripts/package-electron.mjs --win nsis --x64 --publish never --config electron-builder.json
+        env:
+          ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+      - name: Packaged desktop verification
+        run: node scripts/electron-e2e.mjs
+        env:
+          TUGO_E2E_EXECUTABLE: release/win-unpacked/TuGo.exe
+      - name: Upload installer and checksum
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $files = Get-ChildItem release -Filter *.exe
+          if ($files.Count -eq 0) { throw 'Missing installer' }
+          $files | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content release/SHA256SUMS-windows.txt
+          gh release upload $env:RELEASE_TAG $files.FullName release/SHA256SUMS-windows.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-release
+          path: |
+            release/*.exe
+            release/SHA256SUMS-windows.txt

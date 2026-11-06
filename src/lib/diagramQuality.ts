@@ -1,6 +1,9 @@
+import {runCooperatively} from './cooperativeTask'
+import { documentEdgeRoutes,documentEdgeRouteSteps } from './edgeRoute'
 import type { BoardDocument, BoardEdge, BoardElement, BoardOperation } from '../types'
-import { resolvedEdgeAnchor } from './edgeGeometry'
-import { orthogonalControlPoints, sampledEdgePoints, type CanvasRect } from './canvasGeometry'
+import { edgeLabelSize, placeEdgeLabel, type CanvasRect } from './canvasGeometry'
+import { layoutNodeText, textObstacle } from './textLayout'
+import {sceneObstacles} from './sceneObstacles'
 
 type IssueType = 'edge_crossing' | 'edge_over_node' | 'node_overlap' | 'crowded' | 'long_diagonal' | 'orphan' | 'background_occlusion' | 'misaligned' | 'broken_edge' | 'edge_label_collision' | 'text_overflow' | 'small_text' | 'low_contrast' | 'inconsistent_size' | 'uneven_spacing' | 'container_padding'
 type AuditArea = 'structure' | 'layout' | 'connectors' | 'hierarchy' | 'readability' | 'consistency'
@@ -12,6 +15,20 @@ type Point = { x: number; y: number }
 const overlap = (a: Rect, b: Rect) => a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
 const contains = (outer: Rect, inner: Rect, padding = 0) => outer.x - padding <= inner.x && outer.y - padding <= inner.y && outer.x + outer.width + padding >= inner.x + inner.width && outer.y + outer.height + padding >= inner.y + inner.height
 const center = (item: Rect): Point => ({ x: item.x + item.width / 2, y: item.y + item.height / 2 })
+const readableSize = (element: BoardElement) => {
+  const text = String(element.text || '').trim()
+  if (!text || element.kind === 'text') return { width: element.width, height: element.height }
+  const fontSize = Math.max(1, element.fontSize || 16)
+  const lines = text.split('\n').map(line => Array.from(line).length ? line : ' ')
+  const longestLine = Math.max(...lines.map(line => Array.from(line).length))
+  // A card should have enough horizontal room to scan a short phrase. Longer
+  // prose wraps into additional lines instead of producing an impractically
+  // wide canvas.
+  const width = Math.max(element.width, Math.min(360, Math.max(200, Math.ceil(Math.min(longestLine, 24) * fontSize * .68 + 28))))
+  const charsPerLine = Math.max(1, Math.floor((width - 20) / (fontSize * .62)))
+  const requiredLines = lines.reduce((count, line) => count + Math.max(1, Math.ceil(Array.from(line).length / charsPerLine)), 0)
+  return { width, height: Math.max(element.height, 48, Math.ceil(requiredLines * fontSize * 1.35 + 16)) }
+}
 const segmentCross = (a: Point, b: Point, c: Point, d: Point) => {
   const orient = (p: Point, q: Point, r: Point) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
   return orient(a, b, c) * orient(a, b, d) < 0 && orient(c, d, a) * orient(c, d, b) < 0
@@ -22,16 +39,7 @@ const segmentHitsRect = (a: Point, b: Point, rect: Rect) => {
   const tl = { x: rect.x, y: rect.y }, tr = { x: rect.x + rect.width, y: rect.y }, br = { x: rect.x + rect.width, y: rect.y + rect.height }, bl = { x: rect.x, y: rect.y + rect.height }
   return segmentCross(a, b, tl, tr) || segmentCross(a, b, tr, br) || segmentCross(a, b, br, bl) || segmentCross(a, b, bl, tl)
 }
-const edgePoints = (edge: BoardEdge, from?: BoardElement, to?: BoardElement, obstacles: CanvasRect[] = [], occupiedRoutes: Point[][] = []): Point[] => {
-  const fromTarget = to ? center(to) : edge.freeEnd || { x: 0, y: 0 }; const toTarget = from ? center(from) : edge.freeStart || { x: 0, y: 0 }
-  const start = from ? resolvedEdgeAnchor(from, fromTarget, edge.fromAnchor) : edge.freeStart
-  const end = to ? resolvedEdgeAnchor(to, toTarget, edge.toAnchor) : edge.freeEnd
-  if (!start || !end) return []
-  const controls = (edge.controlPoints || []).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y))
-  const routing = edge.routing || 'curve'
-  const resolved = routing === 'elbow' && controls.length === 0 ? orthogonalControlPoints(start, end, obstacles, 18, occupiedRoutes) : controls
-  return sampledEdgePoints(routing, start, end, resolved)
-}
+
 const polylineCrosses = (a: Point[], b: Point[]) => a.slice(1).some((point, index) => b.slice(1).some((other, otherIndex) => segmentCross(a[index], point, b[otherIndex], other)))
 const polylineHitsRect = (points: Point[], rect: Rect) => points.slice(1).some((point, index) => segmentHitsRect(points[index], point, rect))
 const hexToRgb = (value?: string) => {
@@ -75,41 +83,49 @@ const flowRanks = (nodes: BoardElement[], edges: BoardDocument['edges']) => {
   return ranks
 }
 
-export function reflectDiagram(document: BoardDocument): DiagramReflection {
-  if (document.elements.length < 2 || document.edges.length === 0) return { checked: false, score: 100, dimensions: { structure: 100, layout: 100, connectors: 100, hierarchy: 100, readability: 100, consistency: 100 }, summary: '当前画板没有足够的关系线，暂不进行完整质量审计。', issues: [], suggestions: [] }
+function* reflectDiagramSteps(document: BoardDocument, options: { maxIssues?: number; inspectUnconnected?: boolean } = {}): Generator<void,DiagramReflection,unknown> {
+  if (!options.inspectUnconnected && (document.elements.length < 2 || document.edges.length === 0)) return { checked: false, score: 100, dimensions: { structure: 100, layout: 100, connectors: 100, hierarchy: 100, readability: 100, consistency: 100 }, summary: '当前画板没有足够的关系线，暂不进行完整质量审计。', issues: [], suggestions: [] }
   const issues: Issue[] = []
   const backgrounds = document.elements.filter(item => isBackgroundElement(item, document.elements))
   const foreground = document.elements.filter(item => !backgrounds.some(background => background.id === item.id))
+  const routeObstacles=sceneObstacles(document.elements)
   for (let i = 0; i < foreground.length; i += 1) for (let j = i + 1; j < foreground.length; j += 1) {
-    const a = foreground[i], b = foreground[j]
-    if (overlap(a, b)) issues.push(issue('node_overlap', 'layout', 'high', `图形「${a.text || a.id}」与「${b.text || b.id}」重叠`, [a.id, b.id], true))
-    else if (Math.max(0, Math.max(a.x, b.x) - Math.min(a.x + a.width, b.x + b.width)) < 24 && Math.max(0, Math.max(a.y, b.y) - Math.min(a.y + a.height, b.y + b.height)) < 24) issues.push(issue('crowded', 'layout', 'medium', `图形「${a.text || a.id}」与「${b.text || b.id}」间距过小`, [a.id, b.id], true))
+    if(j%32===0)yield
+    const left = foreground[i], right = foreground[j]
+    const a = left.kind === 'text' ? textObstacle(left) : left, b = right.kind === 'text' ? textObstacle(right) : right
+    if (overlap(a, b)) issues.push(issue('node_overlap', 'layout', 'high', `图形「${left.text || left.id}」与「${right.text || right.id}」重叠`, [left.id, right.id], true))
+    else if (left.kind !== 'text' && right.kind !== 'text') {
+      const gap = Math.min(24, Math.min(a.height, b.height) / 4)
+      if (Math.max(0, Math.max(a.x, b.x) - Math.min(a.x + a.width, b.x + b.width)) < gap && Math.max(0, Math.max(a.y, b.y) - Math.min(a.y + a.height, b.y + b.height)) < gap) issues.push(issue('crowded', 'layout', 'medium', `图形「${left.text || left.id}」与「${right.text || right.id}」间距过小`, [left.id, right.id], true))
+    }
   }
   const { nodes, edges, connected } = graph(document); const byId = new Map(document.elements.map(item => [item.id, item]))
-  const auditedRoutes: Point[][] = []
+  const groupedMap = new Set(nodes.map(node => node.groupId).filter(Boolean)).size > 1
+  const routes = yield* documentEdgeRouteSteps(document.elements, document.edges)
   const linked = edges.map(edge => {
-    const points = edgePoints(edge, byId.get(edge.from), byId.get(edge.to), foreground.filter(node => node.kind !== 'text' && node.id !== edge.from && node.id !== edge.to), auditedRoutes)
-    auditedRoutes.push(points)
+    const points = routes.get(edge.id)?.pathPoints || []
     return { edge, a: byId.get(edge.from)!, b: byId.get(edge.to)!, points }
   })
   for (let i = 0; i < linked.length; i += 1) for (let j = i + 1; j < linked.length; j += 1) {
+    if(j%32===0)yield
     const one = linked[i], two = linked[j]
     if ([one.edge.from, one.edge.to].some(id => id === two.edge.from || id === two.edge.to)) continue
-    if (polylineCrosses(one.points, two.points)) issues.push(issue('edge_crossing', 'connectors', 'high', '两条连线交叉，建议重新排列同层节点并使用正交路由', [one.edge.id, two.edge.id], true))
+    if (polylineCrosses(one.points, two.points)) {
+      const channelCrossing = groupedMap && one.edge.routing === 'elbow' && two.edge.routing === 'elbow'
+      issues.push(issue('edge_crossing', 'connectors', channelCrossing ? 'medium' : 'high', channelCrossing ? '分组依赖图存在正交通道交叉，请结合颜色、箭头与实际渲染确认可读性；不要仅为消除交叉就破坏分组布局。' : '两条连线交叉，建议重新排列同层节点并使用正交路由', [one.edge.id, two.edge.id], !channelCrossing))
+    }
   }
   for (const { edge, a, b, points } of linked) {
-    const from = points[0] || center(a), to = points.at(-1) || center(b); const blocker = foreground.find(node => node.id !== a.id && node.id !== b.id && polylineHitsRect(points, node))
-    if (blocker) issues.push(issue('edge_over_node', 'connectors', 'high', `连线穿过「${blocker.text || blocker.id}」，会遮挡文字或误导关系`, [edge.id, blocker.id], true))
+    const from = points[0] || center(a), to = points.at(-1) || center(b); const blocker = routeObstacles.find(node => node.id !== a.id && node.id !== b.id && polylineHitsRect(points, node))
+    if (blocker) issues.push(issue('edge_over_node', 'connectors', 'high', `连线穿过「${document.elements.find(n=>n.id===blocker.id)?.text || blocker.id}」，会遮挡文字或误导关系`, [edge.id, blocker.id], true))
     if ((edge.routing || 'curve') === 'curve' && Math.abs(from.x - to.x) > 260 && Math.abs(from.y - to.y) > 120) issues.push(issue('long_diagonal', 'connectors', 'medium', '存在较长的斜向曲线，可能削弱层级阅读路径', [edge.id], true))
   }
-  for (const background of backgrounds) {
-    const hidden = foreground.filter(item => contains(background, item) && (background.zIndex ?? 0) >= (item.zIndex ?? 0))
-    if (hidden.length) issues.push(issue('background_occlusion', 'hierarchy', 'high', `容器「${background.text || background.id}」层级会遮挡其中的内容`, [background.id, ...hidden.map(item => item.id)], true))
-  }
+  // Renderers force containers below foreground geometry regardless of stale
+  // zIndex values, so those values alone cannot prove content is occluded.
   const ranks = flowRanks(nodes, edges)
   const columns = new Map<number, BoardElement[]>()
   nodes.forEach(node => { const rank = ranks.get(node.id) || 0; columns.set(rank, [...(columns.get(rank) || []), node]) })
-  for (const [rank, items] of columns) {
+  for (const [rank, items] of groupedMap ? [] : columns) {
     if (items.length < 2) continue
     const guide = median(items.map(item => item.x))
     const drifting = items.filter(item => Math.abs(item.x - guide) > 12)
@@ -121,26 +137,31 @@ export function reflectDiagram(document: BoardDocument): DiagramReflection {
       if (gaps.length >= 2 && Math.max(...gaps) - Math.min(...gaps) > 36) issues.push(issue('uneven_spacing', 'layout', 'medium', `第 ${rank + 1} 层卡片的垂直间距不均匀`, items.map(item => item.id), true))
     }
   }
-  for (const edge of document.edges) if (!byId.has(edge.from) || !byId.has(edge.to)) issues.push(issue('broken_edge', 'structure', 'high', `连线「${edge.label || edge.id}」指向不存在的图形`, [edge.id], true))
-  for (const edge of linked) if (edge.edge.label) {
-    const midpoint = Math.floor((edge.points.length - 1) / 2); const left = edge.points[midpoint] || center(edge.a), right = edge.points[midpoint + 1] || center(edge.b)
-    const labelPoint = { x: (left.x + right.x) / 2, y: (left.y + right.y) / 2 }
-    const blocker = foreground.find(node => node.id !== edge.a.id && node.id !== edge.b.id && pointInRect(labelPoint, node))
+  for (const edge of document.edges) if ((!byId.has(edge.from) && !edge.freeStart) || (!byId.has(edge.to) && !edge.freeEnd)) issues.push(issue('broken_edge', 'structure', 'high', `连线「${edge.label || edge.id}」指向不存在的图形`, [edge.id], true))
+  const occupiedLabels: CanvasRect[] = []
+  const labelObstacles = routeObstacles
+  for (const edge of [...linked].sort((a,b)=>(a.edge.zIndex??0)-(b.edge.zIndex??0))) if (edge.edge.label) {
+    const placement = placeEdgeLabel(edge.points, edge.edge.label, labelObstacles, occupiedLabels)
+    const bounds = {x:placement.x-placement.width/2,y:placement.y-placement.height/2,width:placement.width,height:placement.height}
+    occupiedLabels.push(bounds)
+    const blocker = foreground.find((node,index) => overlap(bounds, labelObstacles[index]))
     if (blocker) issues.push(issue('edge_label_collision', 'connectors', 'medium', `连线标签「${edge.edge.label}」落在「${blocker.text || blocker.id}」上`, [edge.edge.id, blocker.id], true))
   }
   for (const element of foreground) {
     const text = String(element.text || '').trim(); if (!text) continue
-    const fontSize = Math.max(1, element.fontSize || 16); const lines = text.split('\n').flatMap(line => Array.from(line).length ? [line] : [' '])
+    const layout = layoutNodeText(element)
+    const fontSize = layout.fontSize; const lines = layout.lines
     const usableWidth = Math.max(1, element.width - 18)
     const charsPerLine = Math.max(1, Math.floor(usableWidth / (fontSize * .62)))
     const requiredLines = lines.reduce((count, line) => count + Math.max(1, Math.ceil(Array.from(line).length / charsPerLine)), 0)
     const requiredHeight = Math.ceil(requiredLines * fontSize * 1.35 + 14)
     const longestLine = Math.max(...lines.map(line => Array.from(line).length))
     const singleLineWidth = Math.ceil(longestLine * fontSize * .62 + 18)
-    if (requiredHeight > element.height) {
-      const severity: Issue['severity'] = requiredHeight > element.height * 1.3 ? 'high' : 'medium'
+    const readable = readableSize(element)
+    if (layout.overflow) {
+      const severity: Issue['severity'] = requiredHeight > element.height * 1.3 || readable.width > element.width * 1.25 ? 'high' : 'medium'
       const safeFont = Math.max(12, Math.floor((element.height - 14) / Math.max(1, requiredLines * 1.35)))
-      const patch = { height: requiredHeight, ...(requiredLines === 1 && singleLineWidth > element.width ? { width: singleLineWidth } : {}), ...(safeFont < fontSize ? { fontSize: safeFont } : {}) }
+      const patch = { width: Math.max(readable.width, requiredLines === 1 ? singleLineWidth : 0), height: readable.height, ...(safeFont < fontSize ? { fontSize: safeFont } : {}) }
       issues.push(issue('text_overflow', 'readability', severity, `图形「${text.slice(0, 20)}」当前 ${Math.round(element.width)}×${Math.round(element.height)} 放不下 ${requiredLines} 行文字；保持 ${fontSize}px 字号至少需要高度 ${requiredHeight}px${requiredLines === 1 ? `、宽度 ${singleLineWidth}px` : ''}。优先扩大框，空间受限时字号最低可降至 ${safeFont}px。`, [element.id], true, patch))
     }
     if (fontSize < 11 && text.length > 1) issues.push(issue('small_text', 'readability', 'medium', `图形「${text.slice(0, 20)}」字号过小`, [element.id], true))
@@ -148,16 +169,24 @@ export function reflectDiagram(document: BoardDocument): DiagramReflection {
     if (ratio !== null && ratio < 3) issues.push(issue('low_contrast', 'readability', 'medium', `图形「${text.slice(0, 20)}」文字与底色对比度不足`, [element.id]))
   }
   for (const frame of backgrounds) {
-    const children = foreground.filter(item => contains(frame, item)); if (!children.length) continue
+    const children = foreground.filter(item => item.kind !== 'text' && contains(frame, item)); if (!children.length) continue
     const padding = Math.min(...children.flatMap(item => [item.x - frame.x, item.y - frame.y, frame.x + frame.width - item.x - item.width, frame.y + frame.height - item.y - item.height]))
-    if (padding < 18) issues.push(issue('container_padding', 'hierarchy', 'medium', `容器「${frame.text || frame.id}」与内容留白不足`, [frame.id, ...children.map(item => item.id)], true))
+    if (padding < Math.min(18, ...children.map(item => item.height / 4))) issues.push(issue('container_padding', 'hierarchy', 'medium', `容器「${frame.text || frame.id}」与内容留白不足`, [frame.id, ...children.map(item => item.id)], true))
   }
   for (const item of document.elements.filter(item => !connected.has(item.id) && item.kind !== 'frame' && item.kind !== 'text')) issues.push(issue('orphan', 'structure', 'medium', `图形「${item.text || item.id}」没有关系线；请确认它是否应保留、分组或连接`, [item.id]))
   const unique = issues.filter((issue, index, all) => all.findIndex(other => other.type === issue.type && other.ids.join('|') === issue.ids.join('|')) === index)
-  const score = Math.max(0, 100 - unique.reduce((sum, issue) => sum + (issue.severity === 'high' ? 18 : 7), 0))
-  const dimensions = (['structure', 'layout', 'connectors', 'hierarchy', 'readability', 'consistency'] as AuditArea[]).reduce((result, area) => ({ ...result, [area]: Math.max(0, 100 - unique.filter(item => item.area === area).reduce((sum, item) => sum + (item.severity === 'high' ? 24 : 10), 0)) }), {} as Record<AuditArea, number>)
+  // Pair counts grow quadratically on dependency maps. Score affected objects
+  // once per dimension, so duplicating an independent panel cannot turn a
+  // readable document into a zero-score document. Individual high issues remain.
+  const dimensions = (['structure', 'layout', 'connectors', 'hierarchy', 'readability', 'consistency'] as AuditArea[]).reduce((result, area) => {
+    const affected = new Map<string, number>()
+    for (const item of unique.filter(item => item.area === area)) for (const id of item.ids) affected.set(id, Math.max(affected.get(id) || 0, item.severity === 'high' ? 100 : 35))
+    const count = area === 'connectors' ? document.edges.length : area === 'structure' ? document.elements.length + document.edges.length : area === 'hierarchy' ? document.elements.length : foreground.length
+    return { ...result, [area]: Math.max(0, Math.round(100 - [...affected.values()].reduce((a,b)=>a+b,0) / Math.max(1,count))) }
+  }, {} as Record<AuditArea, number>)
+  const score = Math.round(Object.values(dimensions).reduce((a,b)=>a+b,0) / 6)
   const suggestions = [...new Set(unique.filter(item => item.fixable).map(item => item.type === 'orphan' ? '确认孤立元素的业务含义后，再决定连接、分组或删除。' : item.area === 'readability' ? '调整卡片尺寸、字号或颜色，保证文字完整且清晰。' : item.area === 'hierarchy' ? '把容器置于底层并预留足够内边距。' : '调用 board_optimize_layout 自动修复可确定的布局、对齐和连线问题。'))]
-  return { checked: true, score, dimensions, issues: unique.slice(0, 16), suggestions, summary: unique.length ? `画布质量审计发现 ${unique.length} 项问题，综合评分 ${score}/100。` : '画布质量审计通过：结构、布局、连线、层级、文字和视觉一致性均无明显问题。', recommendation: unique.length ? '优先处理高严重度问题；可自动修复的项目可调用 board_optimize_layout，其余由 Agent 根据业务语义决定。' : undefined }
+  return { checked: true, score, dimensions, issues: [...unique].sort((a,b)=>Number(b.severity==='high')-Number(a.severity==='high')).slice(0, options.maxIssues ?? 16), suggestions, summary: unique.length ? `画布质量审计发现 ${unique.length} 项问题，综合评分 ${score}/100。` : '画布质量审计通过：结构、布局、连线、层级、文字和视觉一致性均无明显问题。', recommendation: unique.length ? '优先处理高严重度问题；可自动修复的项目可调用 board_optimize_layout，其余由 Agent 根据业务语义决定。' : undefined }
 }
 
 const median = (values: number[]) => values.length ? [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] : 0
@@ -184,10 +213,23 @@ export function optimizeDiagramLayout(document: BoardDocument, scope: 'local' | 
   const rankOrder = [...groups.keys()].sort((a, b) => a - b)
   // Preserve semantic lanes: order each rank by the median position of its parents.
   for (let pass = 0; pass < 3; pass += 1) for (const rank of rankOrder) { const items = groups.get(rank)!; const previousIndex = new Map((groups.get(rank - 1) || []).map((item, index) => [item.id, index])); items.sort((a, b) => median((parents.get(a.id) || []).map(id => previousIndex.get(id)).filter((value): value is number => value !== undefined)) - median((parents.get(b.id) || []).map(id => previousIndex.get(id)).filter((value): value is number => value !== undefined)) || a.y - b.y) }
-  const operations: BoardOperation[] = []; const positions = new Map<string, Rect>(); const layerGap = 312; const rowGap = 96; const snap = (value: number) => Math.round(value / 8) * 8
-  for (const rank of rankOrder) { const items = groups.get(rank)!; const total = items.reduce((sum, item) => sum + item.height, 0) + Math.max(0, items.length - 1) * rowGap; let cursor = 300 - total / 2; items.forEach((item, index) => { const patch = { x: snap(224 + rank * layerGap), y: snap(cursor), zIndex: 10 + rank * 100 + index }; positions.set(item.id, { ...item, ...patch }); operations.push({ op: 'patch_element', id: item.id, patch }); cursor += item.height + rowGap }) }
+  const operations: BoardOperation[] = []; const positions = new Map<string, Rect>(); const rowGap = 96; const snap = (value: number) => Math.round(value / 8) * 8
+  const fitted = new Map(nodes.map(item => [item.id, readableSize(item)]))
+  const rankWidths = new Map(rankOrder.map(rank => [rank, Math.max(...(groups.get(rank) || []).map(item => fitted.get(item.id)!.width))]))
+  const rankGaps = new Map(rankOrder.map(rank => {
+    const widestLabel = Math.max(0, ...edges.filter(edge => (ranks.get(edge.from) || 0) === rank).map(edge => edge.label ? edgeLabelSize(edge.label).width : 0))
+    return [rank, Math.max(112, widestLabel + 28)] as const
+  }))
+  const rankX = new Map<number, number>(); let columnCursor = 224
+  for (const rank of rankOrder) { rankX.set(rank, columnCursor); columnCursor += rankWidths.get(rank)! + (rankGaps.get(rank) || 0) }
+  for (const rank of rankOrder) { const items = groups.get(rank)!; const total = items.reduce((sum, item) => sum + fitted.get(item.id)!.height, 0) + Math.max(0, items.length - 1) * rowGap; let cursor = 300 - total / 2; items.forEach((item, index) => { const size = fitted.get(item.id)!; const patch = { x: snap(rankX.get(rank)!), y: snap(cursor), width: size.width, height: size.height, zIndex: 10 + rank * 100 + index }; positions.set(item.id, { ...item, ...patch }); operations.push({ op: 'patch_element', id: item.id, patch }); cursor += size.height + rowGap }) }
   document.elements.filter(item => !ids.has(item.id) && !backgrounds.has(item.id)).forEach((item, index) => operations.push({ op: 'patch_element', id: item.id, patch: { zIndex: Math.max(5, item.zIndex ?? 5 + index) } }))
   document.elements.filter(item => backgrounds.has(item.id)).forEach((frame, index) => { const children = document.elements.filter(item => item.id !== frame.id && (item.groupId === frame.id || contains(frame, item))).map(item => positions.get(item.id) || item); const patch: Partial<BoardElement> = { zIndex: -1000 + index }; if (children.length) { const left = Math.min(...children.map(item => item.x)), top = Math.min(...children.map(item => item.y)), right = Math.max(...children.map(item => item.x + item.width)), bottom = Math.max(...children.map(item => item.y + item.height)); Object.assign(patch, { x: left - 34, y: top - 48, width: right - left + 68, height: bottom - top + 82 }) }; operations.push({ op: 'patch_element', id: frame.id, patch }) })
   edges.forEach((edge, index) => operations.push({ op: 'patch_edge', id: edge.id, patch: { routing: 'elbow', controlPoints: undefined, zIndex: index } }))
   return operations
 }
+
+export function reflectDiagram(document:BoardDocument,options:{maxIssues?:number;inspectUnconnected?:boolean}={}):DiagramReflection {
+ const steps=reflectDiagramSteps(document,options);while(true){const next=steps.next();if(next.done)return next.value}
+}
+export const reflectDiagramAsync=(document:BoardDocument,options:{maxIssues?:number;inspectUnconnected?:boolean}={},signal?:AbortSignal)=>runCooperatively(reflectDiagramSteps(document,options),signal)

@@ -39,7 +39,7 @@ describe('Electron release security policy', () => {
   })
 
   it('ships only runtime JavaScript and Electron CommonJS entrypoints', () => {
-    expect(builder.files).toContain('runtime-ts/dist/*.js')
+    expect(builder.files).toContain('runtime-ts/dist/**/*.js')
     expect(builder.files).toContain('electron/*.cjs')
     expect(builder.files.filter(pattern => !pattern.startsWith('!')).some(pattern => /source.?map|examples|mcp-server|python|deerflow|langchain|langgraph/i.test(pattern))).toBe(false)
     expect(builder.files).toContain('!node_modules/**/*.map')

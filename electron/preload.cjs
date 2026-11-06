@@ -38,6 +38,9 @@ contextBridge.exposeInMainWorld('tugo', {
     removeForProject: (projectId) => ipcRenderer.invoke('tugo:conversations:remove-for-project', projectId),
   },
   board: {
+    cliReady: () => ipcRenderer.send('tugo:cli:ready'),
+    exportSnapshotData: (projectId, snapshotId) => ipcRenderer.invoke('tugo:projects:snapshots:export', { projectId, snapshotId, payloadOnly: true }),
+    importSnapshotPath: (projectId, path) => ipcRenderer.invoke('tugo:projects:snapshots:import', { projectId, path }),
     onToolCall: (callback) => {
       const listener = (_, payload) => callback(payload)
       ipcRenderer.on('tugo:board-tool-call', listener)

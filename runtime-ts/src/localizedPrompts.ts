@@ -1,7 +1,5 @@
-export type RuntimePromptLocale = 'en' | 'zh-CN' | 'zh-TW'
-
-export const normalizePromptLocale = (value: unknown): RuntimePromptLocale =>
-  value === 'zh-CN' || value === 'zh-TW' ? value : 'en'
+import type {RuntimePromptLocale} from './promptLocale.js'
+export {normalizePromptLocale,type RuntimePromptLocale} from './promptLocale.js'
 
 const english: Record<string, string> = {
   'runtime.system': `# TuGo Canvas Agent

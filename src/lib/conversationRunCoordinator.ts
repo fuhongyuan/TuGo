@@ -1,3 +1,4 @@
+import type {ChatMessage} from '../types'
 export type ActiveConversationRun = { threadId: string; runId: string }
 
 type ActiveEntry = { controller: AbortController; run?: ActiveConversationRun }
@@ -8,6 +9,15 @@ type ActiveEntry = { controller: AbortController; run?: ActiveConversationRun }
  * from forgetting to abort or clear one of its in-memory maps.
  */
 export class ConversationRunCoordinator {
+  private terminalMessages=new Map<string,ChatMessage>()
+  rememberTerminal(conversationId:string,message:ChatMessage){
+    if(message.role!=='assistant'||message.pending)return
+    this.terminalMessages.set(`${conversationId}:${message.id}`,message)
+    if(this.terminalMessages.size>128)this.terminalMessages.delete(this.terminalMessages.keys().next().value!)
+  }
+  reconcileTerminal(conversationId:string,messages:ChatMessage[]){
+    return messages.map(message=>message.pending?this.terminalMessages.get(`${conversationId}:${message.id}`)??message:message)
+  }
   private activeEntries = new Map<string, ActiveEntry>()
 
   begin(conversationId: string) {

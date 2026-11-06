@@ -18,6 +18,7 @@ const messageForCode = (code?: string) => {
     case 'GATEWAY_VISION_UNSUPPORTED': return '当前模型网关不支持图片输入。'
     case 'IMAGE_INPUT_FORMAT_UNSUPPORTED': return '模型服务无法接受当前图片格式。'
     case 'CONTEXT_LIMIT_EXCEEDED': return '当前会话内容超过了模型上下文限制。'
+    case 'CONTEXT_BUDGET_EXCEEDED': return '本地上下文预算检查未通过，本次模型请求尚未发送。'
     case 'CANVAS_UNAVAILABLE': return '画板窗口暂时不可用。'
     default: return ''
   }

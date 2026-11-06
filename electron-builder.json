@@ -13,10 +13,11 @@
     "onlyLoadAppFromAsar": true
   },
   "directories": { "output": "release" },
+  "extraResources": [{ "from": "cli", "to": "cli" }],
   "files": [
     "dist-web/**",
     "electron/*.cjs",
-    "runtime-ts/dist/*.js",
+    "runtime-ts/dist/**/*.js",
     "templates/runtime-defaults.json",
     "assets/**",
     "package.json",

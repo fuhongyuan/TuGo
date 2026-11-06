@@ -50,7 +50,7 @@ export type ModelStreamEvent =
   | { type: 'usage'; usage: Usage }
   | { type: 'provider-metadata'; metadata: JsonObject }
   | { type: 'finish'; reason: FinishReason; rawReason?: string }
-export type ToolDefinition = { name: string; description: string; inputSchema: JsonObject; source: 'builtin' | 'mcp'; handlerKey?: string; timeoutMs: number; connectionId?: string }
+export type ToolDefinition = { requiresVision?: boolean; name: string; description: string; inputSchema: JsonObject; source: 'builtin' | 'mcp'; handlerKey?: string; timeoutMs: number; connectionId?: string }
 export type StructuredEvent = { protocol_version: string; event_id: string; sequence: number; ts: string; thread_id: string; run_id: string; type: StructuredEventType; agent_id?: string | null; message_id?: string | null; tool_call_id?: string | null; payload: JsonObject }
 export type RunCheckpoint = {
   version: 1

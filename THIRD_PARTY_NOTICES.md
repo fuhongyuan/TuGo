@@ -21,6 +21,8 @@ Identifiers below were checked against installed package manifests. Exact versio
 | PDF.js (pdfjs-dist) | Apache-2.0 |
 | sql.js | MIT |
 | Undici | MIT |
+| proper-lockfile | MIT; Copyright (c) 2018 Made With MOXY Lda |
+| js-tiktoken | MIT; local reference BPE tokenizer (o200k ranks); not an exact tokenizer declaration for all models |
 | Vite (build tooling) | MIT |
 | TypeScript (build tooling) | Apache-2.0 |
 
@@ -38,3 +40,5 @@ Transitive dependencies and assets can add notices. Frontend packages in devDepe
 这是清单与检查说明，不是全量合规认证。实际发布前按 [发布清单](docs/RELEASING.md) 完成依赖和资源审查。
 
 The standard Apache-2.0 text remains intact: bracketed example fields in its appendix are part of the standard text. Project attribution is supplied separately in NOTICE. See the [official license](https://www.apache.org/licenses/LICENSE-2.0.txt) and [application guidance](https://www.apache.org/foundation/license-faq.html#Apply-My-Software).
+
+Security-upgrade build/test components explicitly declared in this change: DOMPurify (Apache-2.0 OR MPL-2.0; Apache-2.0 option), image-size (MIT), esbuild (MIT), vite-node (MIT). Patched versions and reviewed dependency overrides are recorded in package-lock.json; notices and original license texts shipped by dependencies remain authoritative.

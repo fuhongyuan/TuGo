@@ -14,6 +14,7 @@ const installRuntime = (request: (method: string, params: Record<string, any>) =
     onStreamEnd: (listener: (value: { subscriptionId: string; runId: string }) => void) => { endListeners.add(listener); return () => endListeners.delete(listener) },
   } } as unknown as typeof window.tugo
   return {
+    captureEvent:()=>[...eventListeners][0],
     emit(subscriptionId: string, type: string, payload: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) { for (const listener of eventListeners) listener({ subscriptionId, event: { type, payload, ...extra } }) },
     end(subscriptionId: string, runId = 'run-1') { for (const listener of endListeners) listener({ subscriptionId, runId }) },
   }
@@ -70,8 +71,9 @@ describe('TuGo embedded Runtime client', () => {
     })
     await new TuGoApi(config).saveSingleModel({ modelId: 'current', providerId: 'openai', model: 'gpt-5', displayName: 'GPT-5', apiKey: '' })
     expect(calls[1].path).toBe('/api/models/current')
-    expect(calls[1].body.extra_config).toMatchObject({ context_window: 128000, max_output_tokens: 32768, vision_capable: true })
+    expect(calls[1].body.extra_config).toMatchObject({ context_window: 128000, max_output_tokens: 32768 })
     expect(calls[1].body.extra_config).not.toHaveProperty('api_key')
+    expect(calls[1].body.extra_config).not.toHaveProperty('vision_capable')
   })
 
   it('does not report an Agent with missing canvas tools as ready', async () => {
@@ -91,4 +93,22 @@ describe('TuGo embedded Runtime client', () => {
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
     expect(cancelRequested).toBe(true)
   })
+  it('does not rebind a cancelled stream when its start receipt arrives after the queued run can begin',async()=>{
+    let resolveStart!:(value:{run_id:string})=>void;const cancelled:string[]=[]
+    installRuntime((method,params)=>method==='run.start'?new Promise(resolve=>resolveStart=resolve):method==='run.cancel'?cancelled.push(params.run_id):undefined)
+    const controller=new AbortController(),onRunId=vi.fn()
+    const pending=new TuGoApi(config).streamChat('thread','agent','draw',()=>{},controller.signal,undefined,onRunId)
+    const rejected=expect(pending).rejects.toMatchObject({name:'AbortError'});controller.abort('user');await rejected
+    resolveStart({run_id:'old'});await new Promise(resolve=>setTimeout(resolve,0))
+    expect(onRunId).not.toHaveBeenCalled();expect(cancelled).toEqual(['old'])
+  })
+  it('ignores a previously queued callback after cancellation, even after unsubscribe',async()=>{
+    let subscription='';const bridge=installRuntime(async(method,params)=>{if(method==='run.start'){subscription=params.subscription_id;return {run_id:'old'}}})
+    const controller=new AbortController(),onText=vi.fn(),onEvent=vi.fn()
+    const pending=new TuGoApi(config).streamChat('thread','agent','draw',onText,controller.signal,undefined,undefined,undefined,onEvent)
+    const callback=bridge.captureEvent()!;await Promise.resolve();const rejected=expect(pending).rejects.toMatchObject({name:'AbortError'});controller.abort();await rejected
+    callback({subscriptionId:subscription,event:{type:'agent.message.delta',payload:{delta:'late'}}})
+    expect(onText).not.toHaveBeenCalled();expect(onEvent).not.toHaveBeenCalled()
+  })
+
 })

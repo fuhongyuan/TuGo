@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { ModelProviderError, normalizeRuntimeError, runtimeFailurePayload } from '../src/errors.js'
+import {projectContext} from '../src/contextProjection.js'
 
 describe('runtime error normalization', () => {
+  it('reports local context admission separately from runtime/HTTP/provider failures',()=>{
+    let failure
+    try{projectContext({messages:[{role:'user',content:'x'.repeat(5000)}]},{contextWindow:4096})}catch(error){failure=normalizeRuntimeError(error)}
+    expect(failure).toMatchObject({error_code:'CONTEXT_BUDGET_EXCEEDED',phase:'context',category:'context_budget',retryable:false})
+    expect(failure?.user_message).toContain('尚未发送');expect(failure?.status).toBeUndefined()
+  })
   it('maps provider status and preserves the original provider detail', () => {
     const error = new ModelProviderError('Model API 429: busy', 429, 2500, 'rate_limit', {
       status: 429,

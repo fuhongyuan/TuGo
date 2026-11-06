@@ -9,6 +9,7 @@ const JSZip = require('jszip')
 const { EmbeddedRuntimeClient } = require('./runtime-client.cjs')
 const { AppDatabaseStorage } = require('./app-database-storage.cjs')
 const { AppRepository } = require('./app-repository.cjs')
+const { startCliServer } = require('./cli-server.cjs')
 const { attachWindowLifecycle, restoreExistingWindow } = require('./window-lifecycle.cjs')
 
 const APP_NAME = 'TuGo'
@@ -58,6 +59,8 @@ let appRepository = null
 let shutdownStarted = false
 let shutdownComplete = false
 let startupReady = false
+let cliServer = null
+let cliRendererReady = false
 let runtimeClient = null
 let downloadHandlerInstalled = false
 let rendererRecoveryAttempts = []
@@ -598,7 +601,7 @@ const registerIpc = () => {
     if (!row) throw new Error('未找到该画布快照')
     return { id: String(row.id), projectId: String(row.project_id), name: String(row.name), reason: String(row.reason), summary: String(row.summary), notes: String(row.notes || ''), source: String(row.source || 'user'), createdAt: String(row.created_at), document: JSON.parse(String(row.document_json)) }
   })
-  ipcMain.handle('tugo:projects:snapshots:export', async (_, { projectId, snapshotId } = {}) => {
+  ipcMain.handle('tugo:projects:snapshots:export', async (_, { projectId, snapshotId, payloadOnly = false } = {}) => {
     const id = String(projectId || '').trim(); const snapshotIdValue = String(snapshotId || '').trim()
     const project = dbGet('SELECT name FROM projects WHERE id = ?', [id])
     const row = dbGet('SELECT * FROM project_snapshots WHERE project_id = ? AND id = ?', [id, snapshotIdValue])
@@ -612,6 +615,7 @@ const registerIpc = () => {
     }
     const payload = { product: APP_NAME, kind: 'board_snapshot', format_version: 1, exported_at: new Date().toISOString(), app_version: app.getVersion(), project: { name: String(project.name || '画板') }, snapshot: { name: String(row.name), reason: String(row.reason || ''), summary: String(row.summary || ''), notes: String(row.notes || ''), source: String(row.source || 'user'), created_at: String(row.created_at), document }, assets }
     const safeName = String(row.name || '画板快照').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '-').trim().slice(0, 80) || '画板快照'
+    if (payloadOnly) return payload
     const selected = await dialog.showSaveDialog(mainWindow, { title: '导出 TuGo 快照', defaultPath: join(app.getPath('downloads'), `${safeName}.tugo-snapshot`), filters: [{ name: 'TuGo 快照', extensions: ['tugo-snapshot'] }] })
     if (selected.canceled || !selected.filePath) return { cancelled: true }
     await writeFile(selected.filePath, JSON.stringify(payload), { encoding: 'utf8', flush: true })
@@ -700,6 +704,9 @@ const registerIpc = () => {
     pendingToolCalls.delete(payload.id)
     payload.error ? pending.reject(new Error(payload.error)) : pending.resolve(payload.result)
   })
+  ipcMain.on('tugo:cli:ready', event => {
+    if (event.sender === mainWindow?.webContents) cliRendererReady = true
+  })
 }
 
 const requestRendererTool = (name, args, context = {}) => new Promise((resolvePromise, rejectPromise) => {
@@ -756,6 +763,9 @@ const createWindow = () => {
   })
   win.once('ready-to-show', () => { if (!win.isDestroyed()) win.show() })
   mainWindow = win
+  cliRendererReady = false
+  win.webContents.on('did-start-loading', () => { cliRendererReady = false })
+  win.on('closed', () => { cliRendererReady = false })
   if (e2eReportPath) ipcMain.handle('tugo:e2e:emit-download', (_event, state) => {
     const payload = state && typeof state === 'object' ? state : {}
     win.webContents.send('tugo:download-state', payload)
@@ -808,7 +818,8 @@ const createWindow = () => {
       })()
     })
   }
-  if (e2eReportPath && !['worker-crash', 'renderer-crash'].includes(e2eMode)) win.webContents.once('did-finish-load', () => {
+  if(e2eReportPath)win.webContents.on('console-message',(_event,...details)=>console.log('E2E_RENDERER',...details))
+  if (e2eReportPath && !['worker-crash', 'renderer-crash', 'cli'].includes(e2eMode)) win.webContents.once('did-finish-load', () => {
     void (async () => {
       try {
         const result = await win.webContents.executeJavaScript(`(async () => {
@@ -823,7 +834,7 @@ const createWindow = () => {
             conversation.messages = [{ id: 'e2e-user', role: 'user', content: 'persisted', createdAt: new Date().toISOString() }]
             await window.tugo.conversations.save(conversation)
             await window.tugo.config.write({ theme: 'dark' })
-            const model = await window.tugo.runtime.request('runtime.http', { method: 'POST', path: '/api/models', body: { name: 'e2e-model', provider_id: 'openai', model: 'fixture', display_name: 'E2E Model', enabled: true, is_default: true, extra_config: { base_url: ${JSON.stringify(e2eProviderUrl)}, context_window: 32768, max_output_tokens: 4096, vision_capable: false } } })
+            const model = await window.tugo.runtime.request('runtime.http', { method: 'POST', path: '/api/models', body: { name: 'e2e-model', provider_id: 'openai', model: 'fixture', display_name: 'E2E Model', enabled: true, is_default: true, extra_config: { base_url: ${JSON.stringify(e2eProviderUrl)}, context_window: 65536, max_output_tokens: 4096, vision_capable: false } } })
             await window.tugo.runtime.request('runtime.http', { method: 'POST', path: '/api/models/test', body: { model_id: model.model_id } })
             const boot = await window.tugo.runtime.request('runtime.http', { method: 'POST', path: '/api/runtime/bootstrap', body: { model_id: model.model_id } })
             const thread = await window.tugo.runtime.request('runtime.http', { method: 'POST', path: '/api/threads', body: { assistant_id: boot.agent.agent_id, metadata: { project_id: project.id, conversation_id: conversation.id } } })
@@ -837,7 +848,7 @@ const createWindow = () => {
             await Promise.race([ended, new Promise((_, reject) => setTimeout(() => reject(new Error('cancel stream timeout')), 5000))])
             const events = await window.tugo.runtime.request('runtime.http', { method: 'POST', path: '/api/runtime/events', body: { thread_id: thread.thread_id, run_id: run.run_id, limit: 100 } })
             const trace = await window.tugo.runtime.request('runtime.http', { method: 'POST', path: '/api/runtime/trace', body: { thread_id: thread.thread_id, run_id: run.run_id } })
-            if (!events.items.some(item => item.type === 'session.interrupted') || !trace.loops?.length) throw new Error('cancel/debug E2E mismatch')
+            if (!events.items.some(item => item.type === 'session.interrupted') || !trace.loops?.length) throw new Error('cancel/debug E2E mismatch: '+JSON.stringify({events:events.items.map(item=>({type:item.type,payload:item.payload})),trace}))
             return { mode, health, folderId: folder.id, projectId: project.id, conversationId: conversation.id, modelProbe: true, attachment: true, cancel: true, debug: true }
           }
           if (mode === 'ui') {
@@ -859,8 +870,9 @@ const createWindow = () => {
               element.dispatchEvent(new Event('change', { bubbles: true }))
             }
             const waitStage = async (name, predicate) => {
+              console.info('E2E_STAGE '+name)
               try { return await waitFor(predicate) }
-              catch (error) { throw new Error('UI stage ' + name + ' failed: ' + String(error?.message || error)) }
+              catch (error) { throw new Error('UI stage ' + name + ' failed: ' + String(error?.message || error) + ' | assistant states: ' + JSON.stringify([...document.querySelectorAll('.chat-message.assistant')].map(node => ({text:node.textContent,html:node.querySelector('.message-content')?.className}))).slice(-6000)) }
             }
             click('button[data-e2e="model-settings"]')
             await waitStage('open settings', () => document.querySelector('.product-settings-modal'))
@@ -904,7 +916,9 @@ const createWindow = () => {
             if (!(canvas instanceof HTMLElement)) throw new Error('canvas root missing')
             // Synthetic pointer events have no browser-managed capture token.
             // Keep the test focused on the renderer handlers and visual state.
-            canvas.setPointerCapture = () => undefined
+            // Synthetic pointer events have no native pointer to capture.
+            // Real capture behavior is covered by the native canvas suite.
+            Element.prototype.setPointerCapture = () => undefined
             canvas.releasePointerCapture = () => undefined
             // React state updates from pointer-down need one renderer turn before
             // the following move is handled. A real user naturally provides that
@@ -1037,22 +1051,25 @@ const createWindow = () => {
             }
             await submitChat('E2E UI chat completion')
             await waitStage('send completed chat', () => messageHas('.chat-message.user', 'E2E UI chat completion'))
-            await waitStage('receive completed chat', () => messageHas('.chat-message.assistant', 'E2E fixture ready'))
-            await submitChat('E2E_CANCEL')
-            await waitStage('show running chat controls', () => document.querySelector('.chat-composer .cancel-run'))
-            await submitChat('E2E queued UI message')
-            await waitStage('queue follow-up chat', () => messageHas('.chat-queue-item', 'E2E queued UI message'))
-            click('.chat-composer .cancel-run')
-            // Cancelling immediately dispatches the queued message. The
-            // composer can therefore keep showing a cancel button for that
-            // *new* run, so its momentary absence is not evidence that the
-            // original request was cancelled. Assert the terminal message of
-            // the original run instead, then independently prove the queued
-            // message was dispatched and completed.
-            await waitStage('cancel original running chat', () => messageHas('.chat-message.assistant .message-content', '已取消本次 AI 操作'))
-            await waitStage('dispatch queued chat', () => messageHas('.chat-message.user', 'E2E queued UI message'))
-            await waitStage('complete queued chat', () => [...document.querySelectorAll('.chat-message.assistant .message-content.assistant-state.is-complete')].filter(item => item.textContent?.includes('E2E fixture ready')).length >= 2)
-            await waitStage('settle queued chat', () => !document.querySelector('.chat-composer .cancel-run'))
+            await waitStage('receive completed chat', () => messageHas('.chat-message.assistant .message-content.assistant-state.is-complete', 'E2E fixture ready'))
+            // Visible text may precede durable finalization. Starting the next
+            // request while the composer is busy intentionally queues it.
+            // Do not accidentally queue E2E_CANCEL behind the first run.
+            await waitStage('settle initial chat', () => !document.querySelector('.chat-composer .cancel-run'))
+            const queueRounds = ${Math.min(5,Math.max(1,Number(process.env.TUGO_E2E_QUEUE_ROUNDS)||1))}
+            for(let round=0;round<queueRounds;round++){
+              const cancelledBefore=[...document.querySelectorAll('.chat-message.assistant .message-content')].filter(item=>item.textContent?.includes('已取消本次 AI 操作')).length
+              await submitChat('E2E_CANCEL')
+              await waitStage('show running chat controls '+round, () => document.querySelector('.chat-composer .cancel-run'))
+              const queuedText='E2E queued UI message'+(round?' #'+round:'')
+              await submitChat(queuedText)
+              await waitStage('queue follow-up chat '+round, () => messageHas('.chat-queue-item', queuedText))
+              click('.chat-composer .cancel-run')
+              await waitStage('cancel original running chat '+round, () => [...document.querySelectorAll('.chat-message.assistant .message-content')].filter(item=>item.textContent?.includes('已取消本次 AI 操作')).length>cancelledBefore)
+              await waitStage('dispatch queued chat '+round, () => messageHas('.chat-message.user', queuedText))
+              await waitStage('complete queued chat '+round, () => [...document.querySelectorAll('.chat-message.assistant .message-content.assistant-state.is-complete')].filter(item => item.textContent?.includes('E2E fixture ready')).length >= round+2)
+              await waitStage('settle queued chat '+round, () => !document.querySelector('.chat-composer .cancel-run'))
+            }
             return { mode, health, settingsTabs: true, snapshotFlow: true, projectFolderFlow: true, canvasFlow: true, edgeFlow: true, selectionFlow: true, zoomFlow: true, mermaidImportFlow: true, plantUmlImportFlow: true, drawIoImportFlow: true, downloadTrayFlow: true, chatFlow: true }
           }
           if (mode === 'conversation') {
@@ -1074,6 +1091,7 @@ const createWindow = () => {
             }
             const messageHas = (selector, text) => [...document.querySelectorAll(selector)].some(item => item.textContent?.includes(text))
             const waitStage = async (name, predicate) => {
+              console.info('E2E_STAGE '+name)
               try { return await waitFor(predicate) }
               catch (error) { throw new Error('conversation stage ' + name + ' failed: ' + String(error?.message || error)) }
             }
@@ -1247,6 +1265,8 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   } catch (error) { await logBackend(`embedded runtime startup failed: ${error instanceof Error ? error.stack || error.message : String(error)}`) }
   startupReady = true
   createWindow()
+  cliServer = await startCliServer({ directory: app.getPath('userData'), ready: () => cliRendererReady && !shutdownStarted,
+    dispatch: (method, params) => requestRendererTool('cli.command', { method, params }, { origin: 'local-cli', tool_timeout_ms: 90_000 }) })
 })
 app.on('activate', () => {
   // macOS exposes the Dock icon before the async database/Runtime bootstrap
@@ -1262,6 +1282,7 @@ app.on('before-quit', event => {
   if (shutdownStarted) return
   shutdownStarted = true
   void (async () => {
+    await cliServer?.close()
     try { await runtimeClient?.stop() } catch (error) { await logBackend(`embedded runtime shutdown failed: ${String(error?.message || error)}`) }
     try {
       await persistDatabase()

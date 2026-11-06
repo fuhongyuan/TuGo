@@ -52,7 +52,7 @@ export const elementStyle = (element: BoardElement) => ({
 export const edgeDefaults = (edge: BoardEdge): Required<Pick<BoardEdge, 'startArrow' | 'endArrow' | 'routing' | 'strokeStyle' | 'opacity' | 'zIndex'>> => ({
   startArrow: edge.startArrow || (edge.arrowStart ? 'arrow' : 'none'),
   endArrow: edge.endArrow || (edge.arrowEnd ? 'arrow' : 'none'),
-  routing: edge.routing || 'curve',
+  routing: edge.routing || 'elbow',
   strokeStyle: edge.strokeStyle || (edge.dashed ? 'dashed' : 'solid'),
   opacity: edge.opacity ?? 1,
   zIndex: edge.zIndex ?? 0,
@@ -65,5 +65,5 @@ export const lineStyles: Array<{ id: StrokeStyle; label: string }> = [
   { id: 'solid', label: '实线' }, { id: 'dashed', label: '虚线' }, { id: 'dotted', label: '点线' },
 ]
 export const routingStyles: Array<{ id: EdgeRouting; label: string }> = [
-  { id: 'curve', label: '曲线' }, { id: 'straight', label: '直线' }, { id: 'polyline', label: '折线' },
+  { id: 'curve', label: '曲线' }, { id: 'straight', label: '直线' }, { id: 'elbow', label: '自动折线' }, { id: 'polyline', label: '自由折线' },
 ]

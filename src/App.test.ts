@@ -1,8 +1,22 @@
 import { describe, expect, it, vi } from 'vitest'
-import { appendProcessEvent, copyTextToClipboard, isStaleConversationSaveError, restoreAssistantMessage } from './App'
-import type { ChatMessage } from './types'
+import { appendProcessEvent, canvasReferenceCenter, copyTextToClipboard, isStaleConversationSaveError, messageTextShouldCollapse, restoreAssistantMessage } from './App'
+import type { CanvasReference, ChatMessage } from './types'
 
 describe('renderer event recovery', () => {
+  it('anchors AI work at the center of the first selected canvas region', () => {
+    const references: CanvasReference[] = [
+      { kind: 'region', id: 'first', label: 'first', x: 100, y: 80, width: 240, height: 120 },
+      { kind: 'region', id: 'second', label: 'second', x: 900, y: 700, width: 100, height: 100 },
+    ]
+    expect(canvasReferenceCenter(references[0])).toEqual({ x: 220, y: 140 })
+    expect(canvasReferenceCenter({ kind: 'edge', id: 'edge', label: 'edge' })).toBeUndefined()
+  })
+  it('defaults completed long assistant and user messages to collapsed', () => {
+    expect(messageTextShouldCollapse({ role: 'assistant', content: 'a'.repeat(181), pending: false })).toBe(true)
+    expect(messageTextShouldCollapse({ role: 'assistant', content: 'a'.repeat(500), pending: true })).toBe(false)
+    expect(messageTextShouldCollapse({ role: 'user', content: 'u'.repeat(421) })).toBe(true)
+    expect(messageTextShouldCollapse({ role: 'user', content: 'short' })).toBe(false)
+  })
   it('treats a save racing with project deletion as stale work, not a user error', () => {
     expect(isStaleConversationSaveError(new Error('会话不存在'))).toBe(true)
     expect(isStaleConversationSaveError(new Error('项目不存在'))).toBe(true)

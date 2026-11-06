@@ -4,12 +4,12 @@ import type { BoardDocument, BoardOperation, CanvasReference, TextAlign } from '
 
 type Props = {
   x: number; y: number; document: BoardDocument; selectedIds: string[]; canPaste: boolean
-  onCommit(operations: BoardOperation[]): void; onSelect(ids: string[]): void; onCopy(): void; onPaste(): void; onDuplicate(): void; onEditText(id: string): void; onAddToChat(references: CanvasReference[]): void; onClose(): void
+  onCommit(operations: BoardOperation[]): void; onSelect(ids: string[]): void; onCopy(): void; onPaste(): void; onDuplicate(): void; onEditText(id: string): void; onEditEdgeLabel(id: string): void; onAddToChat(references: CanvasReference[]): void; onClose(): void
 }
 
 const textFonts = ['Inter', 'Arial', 'Georgia', 'Courier New', 'PingFang SC']
 
-export function CanvasContextMenu({ x, y, document, selectedIds, canPaste, onCommit, onSelect, onCopy, onPaste, onDuplicate, onEditText, onAddToChat, onClose }: Props) {
+export function CanvasContextMenu({ x, y, document, selectedIds, canPaste, onCommit, onSelect, onCopy, onPaste, onDuplicate, onEditText, onEditEdgeLabel, onAddToChat, onClose }: Props) {
   const elements = selectedElements(document, selectedIds)
   const edge = selectedIds.length === 1 ? document.edges.find(item => item.id === selectedIds[0]) : undefined
   const commit = (operations: BoardOperation[], close = true) => { if (operations.length) onCommit(operations); if (close) onClose() }
@@ -24,8 +24,10 @@ export function CanvasContextMenu({ x, y, document, selectedIds, canPaste, onCom
   const edgeReference = edge ? [{ kind: 'edge' as const, id: edge.id, label: edge.label || '未命名连线', from: edge.from || undefined, to: edge.to || undefined }] : []
   if (edge) return <div className="canvas-context-menu glass" style={{ left: x, top: y, maxHeight: `calc(100% - ${y + 8}px)` }} onPointerDown={event => event.stopPropagation()}>
     <div className="context-heading">连线</div>
+    <MenuButton icon={<Copy size={15}/>} label="复制" shortcut="⌘C" onClick={() => { onCopy(); onClose() }}/>
+    <MenuButton icon={<Copy size={15}/>} label="粘贴" shortcut="⌘V" disabled={!canPaste} onClick={() => { onPaste(); onClose() }}/>
     <MenuButton label="添加到对话" onClick={() => { onAddToChat(edgeReference); onClose() }}/>
-    <MenuButton label="编辑标签" onClick={() => { const label = window.prompt('连线标签', edge.label || ''); if (label !== null) commit([{ op: 'patch_edge', id: edge.id, patch: { label } }]); else onClose() }}/>
+    <MenuButton label="编辑标签" onClick={() => { onEditEdgeLabel(edge.id) }}/>
     <MenuButton label="反转方向" onClick={() => commit([{ op: 'patch_edge', id: edge.id, patch: { from: edge.to, to: edge.from, startArrow: edge.endArrow, endArrow: edge.startArrow } }])}/>
     <div className="context-separator"/>
     <MenuButton icon={<Trash2 size={15}/>} label="删除连线" shortcut="⌫" danger onClick={remove}/>

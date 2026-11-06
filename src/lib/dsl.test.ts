@@ -35,6 +35,14 @@ describe('DSL adapters', () => {
     expect(toMermaid(board)).toContain('A -->|拆解| B')
   })
 
+  it('preserves flowchart connector direction as straight anchored arrows', () => {
+    const board = parseMermaid('flowchart TB\nA[开始] --> B[结束]')
+    expect(board.edges).toEqual([expect.objectContaining({
+      routing: 'straight', endArrow: 'arrow',
+      fromAnchor: { x: .5, y: 1 }, toAnchor: { x: .5, y: 0 },
+    })])
+  })
+
   it('keeps complete Mermaid labels, Chinese text and HTML line breaks', () => {
     const board = parseMermaid(`flowchart LR
       P[应用框架（第 5.3 节）] --> T[Effects（计算如何改环境）]
@@ -95,7 +103,7 @@ flowchart LR
       C --> R["推论：Cordis 应用可当作静态装配来推理"]`)
     const node = (id: string) => board.elements.find(item => item.id === id)!
     expect(node('T').y).toBeGreaterThan(node('P').y)
-    expect(node('S').y).toBe(node('T').y)
+    expect(node('S').y + node('S').height / 2).toBe(node('T').y + node('T').height / 2)
     expect(node('G').y).toBeGreaterThan(node('T').y)
     expect(node('C').y).toBeGreaterThan(node('G').y)
     expect(node('R').y).toBeGreaterThan(node('C').y)

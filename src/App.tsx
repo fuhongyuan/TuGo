@@ -1,3 +1,5 @@
+import { observeBoard, getObservation, observationPage, observationSummary, repairNewNodes, confirmRepair, trackBoardVersion, documentSignature } from './lib/boardObservation';
+import { documentEdgeRoutes, routePath } from './lib/edgeRoute';
 import {
   memo,
   useCallback,
@@ -102,6 +104,8 @@ import { ConversationRunCoordinator } from "./lib/conversationRunCoordinator";
 import { optimizeDiagramLayout, reflectDiagram } from "./lib/diagramQuality";
 import { drawingCursorColors, drawingCursorThemes } from "./lib/cursorThemes";
 import { contentBounds } from "./lib/miniMapGeometry";
+import { edgeDefaults } from "./lib/canvasStyle";
+import { runCliCommand, boardRevision } from "./lib/cliCommands";
 import type {
   BoardDocument,
   BoardEdge,
@@ -339,6 +343,16 @@ const referenceMeta = (reference: CanvasReference) =>
     ? `${reference.from || "自由端"} → ${reference.to || "自由端"}`
     : `${Math.round(reference.x || 0)}, ${Math.round(reference.y || 0)} · ${Math.round(reference.width || 0)}×${Math.round(reference.height || 0)}`;
 
+export const canvasReferenceCenter = (reference?: CanvasReference) =>
+  reference && [reference.x, reference.y, reference.width, reference.height].every(Number.isFinite)
+    ? { x: reference.x! + reference.width! / 2, y: reference.y! + reference.height! / 2 }
+    : undefined;
+
+export const messageTextShouldCollapse = (message: Pick<ChatMessage, "role" | "content" | "pending">) =>
+  message.role === "assistant"
+    ? !message.pending && message.content.length > 180
+    : message.content.length > 420;
+
 const canvasReferencesForSelection = (
   document: BoardDocument,
   selectedIds: string[],
@@ -436,7 +450,9 @@ export const appendProcessEvent = (
   if (type === "context.summarization.started")
     return milestone({ id: "context:summary", kind: "status", label: "正在整理对话上下文", detail: "保留任务目标、关键决定和未完成事项", status: "running", sequence }, "context:summary");
   if (type === "context.summarization.completed" || type === "context.summarization.degraded")
-    return milestone({ id: "context:summary", kind: "status", label: "已整理对话上下文", detail: type.endsWith("degraded") ? "已使用本地摘要继续任务" : "较早内容已压缩，任务继续运行", status: "success", sequence }, "context:summary");
+    return payload.applied === false
+      ? milestone({ id: "context:summary", kind: "status", label: "上下文整理未完成", detail: "未应用压缩，原始记录保留", status: "error", sequence }, "context:summary")
+      : milestone({ id: "context:summary", kind: "status", label: "已整理对话上下文", detail: type.endsWith("degraded") ? "已使用本地摘要继续任务" : "较早内容已压缩，任务继续运行", status: "success", sequence }, "context:summary");
   if (type === "agent.message.delta") {
     const contentDelta = String(payload.delta || "");
     const streamDelta = String(payload.reasoning_delta || "");
@@ -645,7 +661,7 @@ export const appendProcessEvent = (
       return milestone({
         id: `llm:completed:${sequence}`,
         kind: "thinking",
-        label: "模型回应",
+        label: payload.source === "runtime_policy" ? "画板检查结果" : "模型回应",
         detail: turnContent,
         status: "success",
         sequence,
@@ -676,7 +692,9 @@ export const appendProcessEvent = (
       sequence,
     });
   if (type === "session.completed" || type === "session.complete")
-    return finishRunning(items, "success");
+    return payload.status === "partial"
+      ? milestone({ id: "quality:partial", kind: "status", label: "本轮已结束，质量尚未通过", detail: "修改已保存，剩余问题见答复；不是运行服务故障", status: "success", sequence }, "quality:partial")
+      : finishRunning(items, "success");
   if (type === "session.failed" || type === "session.interrupted")
     return items.map((item) => ({ ...item, status: "error" }));
   return items;
@@ -786,11 +804,13 @@ export default function App() {
     future: [],
   });
   const historyRef = useRef(history);
+  const [cliInitialized, setCliInitialized] = useState(false);
   const activeIdRef = useRef(activeId);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [chatReferences, setChatReferences] = useState<CanvasReference[]>([]);
   const [projectPanelOpen, setProjectPanelOpen] = useState(true);
   const [chatOpen, setChatOpen] = useState(true);
+  const [presenting, setPresenting] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [aiConfigurationOpen, setAiConfigurationOpen] = useState(false);
   const [dslOpen, setDslOpen] = useState(false);
@@ -815,7 +835,9 @@ export default function App() {
   const [aiPlaybackQueue, setAiPlaybackQueue] = useState<AiCanvasPlayback[]>(
     [],
   );
-  const aiPlayback = aiPlaybackQueue[0] || null;
+  // A completed/interrupted run can leave a visual playback queued briefly.
+  // Never let that transient projection render over another project.
+  const aiPlayback = aiPlaybackQueue.find((playback) => playback.projectId === activeId) || null;
   const [status, setStatus] = useState<BootstrapStatus>(initialStatus);
   const [models, setModels] = useState<ModelRecord[]>([]);
   const [enabledSkills, setEnabledSkills] = useState<SkillRecord[]>([]);
@@ -839,12 +861,18 @@ export default function App() {
   const aiCanvasWork = useMemo<AiCanvasWork | null>(() => {
     if (!activeId) return null;
     const activeRun = (conversations[activeId] || [])
-      .map((conversation) => ({
-        conversation,
-        message: [...conversation.messages]
+      .map((conversation) => {
+        const message = [...conversation.messages]
           .reverse()
-          .find((message) => message.role === "assistant" && message.pending),
-      }))
+          .find((item) => item.role === "assistant" && item.pending);
+        const messageIndex = message
+          ? conversation.messages.findIndex((item) => item.id === message.id)
+          : -1;
+        const userMessage = messageIndex > 0
+          ? [...conversation.messages.slice(0, messageIndex)].reverse().find((item) => item.role === "user")
+          : undefined;
+        return { conversation, message, userMessage };
+      })
       .find((item) => item.message);
     if (!activeRun?.message) return null;
     const status = activeRun.message.runStatus;
@@ -856,6 +884,7 @@ export default function App() {
     return {
       id: `${activeRun.conversation.id}:${activeRun.message.id}`,
       label: label.replace(/\s+/g, " ").trim().slice(0, 72),
+      anchor: canvasReferenceCenter(activeRun.userMessage?.references?.[0]),
     };
   }, [activeId, conversations, runningConversationIds]);
   // Runtime emits `run.steered` only after it has durably added an in-flight
@@ -900,6 +929,16 @@ export default function App() {
   }, [history]);
   useEffect(() => {
     activeIdRef.current = activeId;
+  }, [activeId]);
+
+  // Discard interrupted playback from a previously active board. This also
+  // removes pre-fix in-memory queue entries that do not yet have a projectId.
+  useEffect(() => {
+    if (!activeId) return;
+    setAiPlaybackQueue((current) => {
+      const next = current.filter((playback) => playback.projectId === activeId);
+      return next.length === current.length ? current : next;
+    });
   }, [activeId]);
   useEffect(() => {
     projectsRef.current = projects;
@@ -1304,6 +1343,7 @@ export default function App() {
         future: [],
       });
     }
+    setCliInitialized(true);
     if (!bridge) {
       setStatus(webPreviewStatus);
       return;
@@ -1359,7 +1399,7 @@ export default function App() {
                 existingModel.extra_config?.max_output_tokens || 32768,
               ),
               visionCapable:
-                existingModel.extra_config?.vision_capable !== false,
+                existingModel.extra_config?.vision_capable === true,
             },
             // The Lead Agent must be rebound to the adopted model. Keeping a
             // previous bootstrap marker here would skip that rebinding.
@@ -1417,17 +1457,20 @@ export default function App() {
   useEffect(() => {
     if (!activeId) return;
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    // Keep project switching on the live document, not the last debounced save.
+    const liveProjects = projectsRef.current.map(item => item.id === activeId ? { ...item, document: history.current } : item);
+    projectsRef.current = liveProjects;
+    setProjects(liveProjects);
     saveTimer.current = window.setTimeout(async () => {
       const existing = projects.find((project) => project.id === activeId);
       if (!existing) return;
       if (window.tugo) {
-        const updated = await window.tugo.projects.update({
+        await window.tugo.projects.update({
           id: activeId,
           document: history.current,
         });
-        setProjects((items) =>
-          items.map((item) => (item.id === updated.id ? updated : item)),
-        );
+        // The response may describe an older revision. It must never replace
+        // a newer local document while the user is still editing.
       } else {
         setProjects((items) =>
           items.map((item) =>
@@ -1459,11 +1502,13 @@ export default function App() {
     };
   };
   const commitOperations = useCallback(
-    (operations: BoardOperation[]) =>
+    (operations: BoardOperation[]) => {
+      setAiPlaybackQueue([]);
       setHistory((current) => {
         const next = commit(current, operations);
         return { ...next, current: syncDocumentDsl(next.current) };
-      }),
+      });
+    },
     [],
   );
   const completeAiPlayback = useCallback(
@@ -1475,6 +1520,9 @@ export default function App() {
       ),
     [],
   );
+  const updateCanvasViewport = useCallback((viewport: BoardDocument['viewport']) => {
+    setHistory(current => ({ ...current, current: { ...current.current, viewport } }));
+  }, []);
   const performUndo = useCallback(
     () => setHistory((current) => undo(current)),
     [],
@@ -1573,6 +1621,7 @@ export default function App() {
     ) => {
       const project = projectsRef.current.find((item) => item.id === projectId);
       if (!project) throw new Error("找不到目标项目，已停止本次画布操作。");
+      trackBoardVersion(projectId, document);
       const updated = {
         ...project,
         document,
@@ -1859,6 +1908,51 @@ export default function App() {
       window.tugo?.board.onToolCall(
         async ({ id, name, args, context }) => {
           try {
+            if (name === 'cli.command') {
+              if (context.origin !== 'local-cli' || !window.tugo) throw new Error('CLI origin rejected');
+              const refresh = async () => {
+                const [items, folders] = await Promise.all([window.tugo!.projects.list(), window.tugo!.folders.list()]);
+                const live = items.map(item => item.id === activeIdRef.current ? { ...item, document: historyRef.current.current } : item);
+                projectsRef.current = live; setProjects(live); setFolders(folders);
+                if (activeIdRef.current && !live.some(item => item.id === activeIdRef.current)) {
+                  const next = live[0]; activeIdRef.current = next?.id || ''; setActiveId(next?.id || '');
+                  const nextHistory = { current: next ? normalizeDocument(next.document) : emptyDocument(), past: [], future: [] };
+                  historyRef.current = nextHistory; setHistory(nextHistory); setSelectedIds([]); setAiPlaybackQueue([]);
+                }
+              };
+              const save = async (projectId: string, next: BoardDocument, expected: BoardDocument) => {
+                const live = projectId === activeIdRef.current ? historyRef.current.current : projectsRef.current.find(item => item.id === projectId)?.document;
+                if (live !== expected) throw new Error('REVISION_CONFLICT：操作期间画板已改变，请重新读取');
+                next = syncDocumentDsl(next);
+                setAiPlaybackQueue([]);
+                if (projectId === activeIdRef.current) {
+                  const updated = commit(historyRef.current, [{ op: 'replace_document', document: next }]);
+                  historyRef.current = updated; setHistory(updated);
+                }
+                await persistProjectDocument(projectId, next);
+              };
+              const result = await runCliCommand(String(args.method), args.params as Record<string, unknown>, {
+                bridge: window.tugo,
+                project: projectId => projectsRef.current.find(item => item.id === projectId),
+                activeHistory: () => ({ id: activeIdRef.current, history: historyRef.current }),
+                refresh, save,causeId:String(context.execution_call_id||id),
+                open: project => {
+                  if (project.id === activeIdRef.current) return;
+                  const oldId = activeIdRef.current, oldDocument = historyRef.current.current;
+                  if (oldId) void persistProjectDocument(oldId, oldDocument);
+                  activeIdRef.current = project.id; setActiveId(project.id); setAiPlaybackQueue([]); setSelectedIds([]);
+                  const next = { current: normalizeDocument(project.document), past: [], future: [] };
+                  historyRef.current = next; setHistory(next);
+                },
+                undoRedo: async (projectId, isRedo) => {
+                  if (projectId !== activeIdRef.current) throw new Error('请先 projects open 打开目标画板');
+                  const next = isRedo ? redo(historyRef.current) : undo(historyRef.current);
+                  historyRef.current = next; setHistory(next); setAiPlaybackQueue([]);
+                  await persistProjectDocument(projectId, next.current); return next.current;
+                },
+              });
+              window.tugo.board.respondToolCall(id, result); return;
+            }
             const projectId = String(args.project_id || "").trim();
             if (!projectId)
               throw new Error("每次画布工具调用都必须提供 project_id。");
@@ -1940,11 +2034,20 @@ export default function App() {
               });
               return;
             }
+            if (name === 'board_observe' || name === 'board_get_observation') {
+              const current = () => projectId === activeIdRef.current ? historyRef.current.current : projectsRef.current.find(item=>item.id===projectId)?.document || document;
+              if (args.expected_revision && args.expected_revision !== await boardRevision(document)) throw new Error('REVISION_CONFLICT：观察目标版本已改变，请重新读取。');
+              const observation = name === 'board_get_observation'
+                ? getObservation(String(args.observation_id || ''),projectId,document)
+                : await observeBoard({projectId,document,current,waitMs:Number(args.wait_ms ?? 1200)});
+              window.tugo?.board.respondToolCall(id,{ok:true,projectId,observation:observationPage(observation,args.offset,args.limit)}); return;
+            }
             if (name === "board_get_state") {
               window.tugo?.board.respondToolCall(id, {
                 ok: true,
                 projectId,
                 board: compactBoardSnapshot(document),
+                revision: await boardRevision(document),
               });
               return;
             }
@@ -2056,6 +2159,7 @@ export default function App() {
                 ok: true,
                 projectId,
                 mime_type: "image/png",
+                provenance: {target:'png_export',canvas_dom_verified:false,content_hash:await boardRevision(document)},
                 image_base64: image.base64,
                 region,
                 width: image.width,
@@ -2132,7 +2236,10 @@ export default function App() {
                 playbackOperations,
               ).current;
             }
-            nextDocument = syncDocumentDsl(nextDocument);
+            const repairCauseId=String(context.execution_call_id||id);
+            const repairs = repairNewNodes(nextDocument,playbackOperations || [],{before:document,causeId:repairCauseId,allowRepair:!historyAlreadyUpdated});
+            nextDocument = syncDocumentDsl(repairs.document);
+            if (repairs.patches.length) playbackOperations = [...(playbackOperations || []),...repairs.patches];
             if (projectId === activeIdRef.current && !historyAlreadyUpdated)
               setHistory((current) =>
                 commit(current, [
@@ -2147,36 +2254,35 @@ export default function App() {
                 .replace(/\s+/g, " ")
                 .trim()
                 .slice(0, 42);
-              setAiPlaybackQueue((current) =>
-                [
-                  ...current,
+              setAiPlaybackQueue((current) => {
+                // Do not compose a new project playback on top of another
+                // project's old visual base. That was the source of
+                // unselectable, unsaved "ghost" cards after switching boards.
+                const projectQueue = current.filter(
+                  (playback) => playback.projectId === projectId,
+                );
+                return [
+                  ...projectQueue,
                   {
                     id: `ai_${id}`,
-                    base: current.length
+                    projectId,
+                    base: projectQueue.length
                       ? applyBoardOperations(
-                          current.at(-1)!.base,
-                          current.at(-1)!.operations,
+                          projectQueue.at(-1)!.base,
+                          projectQueue.at(-1)!.operations,
                         )
                       : document,
                     operations: playbackOperations,
                     label: intent || "AI 正在绘制",
                   },
-                ].slice(-8),
-              );
+                ].slice(-8);
+              });
             }
-            await persistProjectDocument(projectId, nextDocument);
-            // Keep every mutation informed by a short local geometry signal, without
-            // turning it into a full review round. The Agent chooses when the draft
-            // is complete enough to call board_review_quality for the full audit.
-            const localAudit = reflectDiagram(nextDocument);
-            const layoutFeedback = localAudit.checked
-              ? {
-                  score: localAudit.score,
-                  summary: localAudit.summary,
-                  issues: localAudit.issues.slice(0, 3),
-                  suggestions: localAudit.suggestions.slice(0, 2),
-                }
-              : undefined;
+            try{await persistProjectDocument(projectId,nextDocument)}catch(error){throw new Error(`保存回执失败，结果未知；修复候选 ${repairs.id}，因果 ${repairCauseId}。先核对状态，不要重放原操作。${error instanceof Error?error.message:String(error)}`)}
+            const observation = await observeBoard({projectId,document:nextDocument,before:document,
+              current:()=>projectId===activeIdRef.current?historyRef.current.current:projectsRef.current.find(item=>item.id===projectId)?.document || nextDocument,
+              directIds:[...new Set((playbackOperations || []).flatMap(op=>'element' in op?[op.element.id]:'edge' in op?[op.edge.id]:'id' in op?[op.id]:'ids' in op?op.ids:[]))],
+              fixes:await confirmRepair(repairs,nextDocument,{acknowledged:true}),repairPlan:{id:repairs.id,budget:repairs.budget},causeId:repairCauseId,render:false});
             window.tugo?.board.respondToolCall(id, {
               ok: true,
               projectId,
@@ -2185,7 +2291,7 @@ export default function App() {
               edge_count: nextDocument.edges.length,
               message:
                 "画板已更新。若要核对结果，请调用 board_get_state 或 board_query_elements。",
-              ...(layoutFeedback ? { layout_feedback: layoutFeedback } : {}),
+              observation: observationSummary(observation),
             });
           } catch (error) {
             window.tugo?.board.respondToolCall(
@@ -2199,7 +2305,20 @@ export default function App() {
     [persistProjectDocument],
   );
 
+  useEffect(() => { if (cliInitialized) window.tugo?.board.cliReady(); }, [cliInitialized]);
+
   const openProject = (project: BoardProject) => {
+    if (project.id === activeIdRef.current) return;
+    if (activeIdRef.current) {
+      const leavingId = activeIdRef.current;
+      const leavingDocument = historyRef.current.current;
+      // Functional update preserves a newly-created project queued by the caller.
+      setProjects(items => items.map(item => item.id === leavingId ? { ...item, document: leavingDocument } : item));
+      projectsRef.current = projectsRef.current.map(item => item.id === leavingId ? { ...item, document: leavingDocument } : item);
+      if (window.tugo) void window.tugo.projects.update({ id: leavingId, document: leavingDocument }).catch(error => console.error('保存画布失败', error));
+    }
+    project = projectsRef.current.find(item => item.id === project.id) || project;
+    if (project.id !== activeIdRef.current) setAiPlaybackQueue([]);
     setActiveId(project.id);
     setHistory({
       current: normalizeDocument(project.document),
@@ -2676,6 +2795,9 @@ export default function App() {
       workingConversation,
     );
     const publishConversation = (nextConversation: ProjectConversation) => {
+      const terminal=nextConversation.messages.find(item=>item.id===assistantId&&!item.pending)
+      if(terminal)runCoordinatorRef.current.rememberTerminal(conversationId,terminal)
+      nextConversation={...nextConversation,messages:runCoordinatorRef.current.reconcileTerminal(conversationId,nextConversation.messages)}
       const current = conversationsRef.current;
       const next = {
         ...current,
@@ -2685,8 +2807,9 @@ export default function App() {
       };
       conversationsRef.current = next;
       setConversations(next);
+      return nextConversation;
     };
-    publishConversation(workingConversation);
+    workingConversation=publishConversation(workingConversation);
     await persistConversation(workingConversation);
     // References belong to this outgoing message. Clear the composer state
     // immediately so a failed/cancelled run cannot accidentally reuse them.
@@ -2712,7 +2835,7 @@ export default function App() {
         ),
         updatedAt: new Date().toISOString(),
       };
-      publishConversation(workingConversation);
+      workingConversation=publishConversation(workingConversation);
     };
     const userRequest = agentContent;
     try {
@@ -2789,7 +2912,7 @@ export default function App() {
             title: cleanTitle,
             updatedAt: new Date().toISOString(),
           };
-          publishConversation(workingConversation);
+          workingConversation=publishConversation(workingConversation);
           titlePersist = persistConversation(workingConversation).catch(
             () => workingConversation,
           );
@@ -2833,7 +2956,7 @@ export default function App() {
                 messages,
                 updatedAt: new Date().toISOString(),
               };
-              publishConversation(workingConversation);
+              workingConversation=publishConversation(workingConversation);
               void persistConversation(workingConversation);
             }
             return;
@@ -2883,7 +3006,7 @@ export default function App() {
               window.clearTimeout(presentationRenderTimer);
             presentationRenderTimer = undefined;
             lastPresentationPublishAt = Date.now();
-            publishConversation(workingConversation);
+            workingConversation=publishConversation(workingConversation);
           };
           if (!isDelta || now - lastPresentationPublishAt >= 120) {
             publishPresentation();
@@ -2920,7 +3043,7 @@ export default function App() {
         messages: completedMessages,
         updatedAt: new Date().toISOString(),
       };
-      publishConversation(workingConversation);
+      workingConversation=publishConversation(workingConversation);
       await persistConversation(workingConversation);
     } catch (error) {
       flushStreamText();
@@ -2937,7 +3060,7 @@ export default function App() {
         messages: finalMessages,
         updatedAt: new Date().toISOString(),
       };
-      publishConversation(workingConversation);
+      workingConversation=publishConversation(workingConversation);
       await persistConversation(workingConversation);
     } finally {
       if (streamRenderTimer) window.clearTimeout(streamRenderTimer);
@@ -3206,7 +3329,7 @@ export default function App() {
 
   return (
     <I18nProvider language={language}>
-    <div className="app-shell">
+    <div className={`app-shell ${presenting ? "is-presenting" : ""}`}>
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark"><img src={tugoLogo} alt="" /></div>
@@ -3295,8 +3418,12 @@ export default function App() {
             <span>Skill</span>
           </button>
           <InfiniteCanvas
+            key={activeId}
+            projectId={activeId}
+            onPresentationChange={setPresenting}
             document={history.current}
             onCommit={commitOperations}
+            onViewportChange={updateCanvasViewport}
             onUndo={performUndo}
             onRedo={performRedo}
             canUndo={history.past.length > 0}
@@ -4242,9 +4369,6 @@ function ChatPanel({
             <ChatMessageBubble
               key={message.id}
               message={message}
-              autoCollapse={
-                message.role === "user" && Boolean(messages[index + 1]?.pending)
-              }
               onBranch={() => void onBranchConversation(index)}
               onReplay={(replacement) =>
                 onReplayUserMessage(index, replacement)
@@ -4698,7 +4822,6 @@ function QueueItem({
 
 const ChatMessageBubble = memo(function ChatMessageBubble({
   message,
-  autoCollapse,
   onBranch,
   onReplay,
   onDebug,
@@ -4706,7 +4829,6 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
   previewDocument,
 }: {
   message: ChatMessage;
-  autoCollapse?: boolean;
   onBranch(): void;
   onReplay(replacement?: string): Promise<void>;
   onDebug(threadId: string, runId: string): void;
@@ -4714,8 +4836,11 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
   previewDocument?: BoardDocument;
 }) {
   const [copied, setCopied] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
-  const [textCollapsed, setTextCollapsed] = useState(false);
+  const text =
+    message.content || (message.pending ? "正在思考并操作画板…" : "");
+  const textLong = messageTextShouldCollapse({ ...message, content: text });
+  const [textCollapsed, setTextCollapsed] = useState(textLong);
+  const defaultCollapseMessageRef = useRef(textLong ? message.id : "");
   const [statsExpanded, setStatsExpanded] = useState(false);
   const [referencesExpanded, setReferencesExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -4728,12 +4853,12 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [message.pending, message.role]);
-  const text =
-    message.content || (message.pending ? "正在思考并操作画板…" : "");
-  const collapsible = message.role === "user" && text.length > 420;
   useEffect(() => {
-    if (autoCollapse && collapsible) setCollapsed(true);
-  }, [autoCollapse, collapsible]);
+    if (textLong && defaultCollapseMessageRef.current !== message.id) {
+      defaultCollapseMessageRef.current = message.id;
+      setTextCollapsed(true);
+    }
+  }, [message.id, textLong]);
   const copy = async () => {
     if (!text) return;
     try {
@@ -4760,8 +4885,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
     runPresentation?.state === "failed" ||
     runPresentation?.state === "timed_out";
   const assistantText = message.pending ? "" : text;
-  const assistantTextLong = assistantText.length > 180;
-  const showAssistantTextFaded = assistantTextLong && textCollapsed;
+  const showTextFaded = textLong && textCollapsed;
   const liveStatus = message.runStatus || createRunPresentation(message.createdAt);
   const quiet = message.pending && runIsQuiet(liveStatus, clock);
   const liveHeadline = quiet ? "仍在等待模型响应" : liveStatus.headline;
@@ -4825,12 +4949,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
   const totalRemoved =
     completedChanges.removedElements + completedChanges.removedEdges;
   const hasChanges = Boolean(totalAdded || totalUpdated || totalRemoved);
-  const displayText =
-    message.role === "assistant"
-      ? assistantText
-      : collapsed
-        ? `${text.slice(0, 260).trimEnd()}…`
-        : text;
+  const displayText = message.role === "assistant" ? assistantText : text;
   const sentAt = new Date(message.createdAt);
   const sentAtLabel = Number.isNaN(sentAt.getTime())
     ? ""
@@ -4997,7 +5116,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
                   <button type="button" disabled={!draft.trim() || replaying} onClick={() => void replay(draft)}>{replaying ? "正在重新发送…" : "保存并重新发送"}</button>
                 </div>
               </div>
-            ) : message.role === "assistant" && showAssistantTextFaded ? (
+            ) : showTextFaded ? (
               <div className="assistant-text-fade">
                 <div className="assistant-text-fade-content">
                   <ReactMarkdown
@@ -5023,7 +5142,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
                 >
                   {displayText}
                 </ReactMarkdown>
-                {message.role === "assistant" && assistantTextLong && !textCollapsed && (
+                {textLong && !textCollapsed && (
                   <button
                     type="button"
                     className="assistant-text-collapse"
@@ -5151,15 +5270,6 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
         <div className="message-footer">
           {sentAtLabel ? <time className="message-time" dateTime={message.createdAt}>{sentAtLabel}</time> : null}
           <div className="message-actions">
-          {collapsible && (
-            <button
-              className="message-copy"
-              title={collapsed ? "展开消息" : "折叠消息"}
-              onClick={() => setCollapsed((value) => !value)}
-            >
-              {collapsed ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
-            </button>
-          )}
           {message.role === "user" && !message.pending && (
             <>
               <button
@@ -5726,7 +5836,7 @@ function RunDebugDialog({
                 {typeof trace.failure.retryable === "boolean" ? (
                   <small>{trace.failure.retryable ? "可重试" : "不可重试"}</small>
                 ) : null}
-                {trace.failure.status ? (
+                {typeof trace.failure.status === 'number' && Number.isInteger(trace.failure.status) && trace.failure.status >= 100 && trace.failure.status <= 599 ? (
                   <small>HTTP {String(trace.failure.status)}</small>
                 ) : null}
               </div>
@@ -6440,7 +6550,6 @@ function SnapshotBrowserDialog({
 
 function DslPreview({ document, imageSources = {} }: { document: BoardDocument; imageSources?: Record<string, string> }) {
   const elements = document.elements;
-  const elementById = new Map(elements.map((element) => [element.id, element]));
   const edgePoints = document.edges.flatMap((edge) =>
     [edge.freeStart, edge.freeEnd, ...(edge.controlPoints || [])].filter(
       (point): point is { x: number; y: number } =>
@@ -6461,33 +6570,10 @@ function DslPreview({ document, imageSources = {} }: { document: BoardDocument; 
   const padding = 46,
     width = Math.max(1, maxX - minX + padding * 2),
     height = Math.max(1, maxY - minY + padding * 2);
-  const endpoint = (edge: BoardEdge, side: "from" | "to") => {
-    const element = elementById.get(side === "from" ? edge.from : edge.to);
-    const free = side === "from" ? edge.freeStart : edge.freeEnd;
-    const anchor = side === "from" ? edge.fromAnchor : edge.toAnchor;
-    return element
-      ? {
-          x: element.x + element.width * (anchor?.x ?? 0.5),
-          y: element.y + element.height * (anchor?.y ?? 0.5),
-        }
-      : free || { x: 0, y: 0 };
-  };
+  const previewRoutes = documentEdgeRoutes(elements, document.edges);
   const pathFor = (edge: BoardEdge) => {
-    const start = endpoint(edge, "from"),
-      end = endpoint(edge, "to"),
-      control = edge.controlPoints?.[0];
-    if (edge.routing === "straight")
-      return `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
-    if (edge.routing === "elbow") {
-      const first = control || { x: (start.x + end.x) / 2, y: start.y };
-      const second = edge.controlPoints?.[1] || { x: first.x, y: end.y };
-      return `M ${start.x} ${start.y} L ${first.x} ${first.y} L ${second.x} ${second.y} L ${end.x} ${end.y}`;
-    }
-    const curve = control || {
-      x: (start.x + end.x) / 2,
-      y: (start.y + end.y) / 2,
-    };
-    return `M ${start.x} ${start.y} Q ${curve.x} ${curve.y} ${end.x} ${end.y}`;
+    const route = previewRoutes.get(edge.id);
+    return route ? routePath(route.routing, route.start, route.end, route.points) : '';
   };
   const shape = (element: BoardElement) => {
     const w = element.width,
@@ -6572,17 +6658,25 @@ function DslPreview({ document, imageSources = {} }: { document: BoardDocument; 
         viewBox={`${minX - padding} ${minY - padding} ${width} ${height}`}
         preserveAspectRatio="xMidYMid meet"
       >
-        {document.edges.map((edge) => (
-          <path
-            key={edge.id}
-            d={pathFor(edge)}
-            fill="none"
-            stroke={edge.stroke}
-            strokeWidth={edge.strokeWidth}
-            strokeDasharray={edge.strokeStyle === "dashed" ? "8 5" : undefined}
-            opacity={edge.opacity ?? 1}
-          />
-        ))}
+        <defs>
+          <marker id="dsl-preview-arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+            <path d="M 1 1 L 9 5 L 1 9" fill="none" stroke="context-stroke" strokeWidth="1.6" />
+          </marker>
+          <marker id="dsl-preview-triangle" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+            <path d="M 1 1 L 9 5 L 1 9 Z" fill="context-stroke" />
+          </marker>
+          <marker id="dsl-preview-circle" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+            <circle cx="5" cy="5" r="3.2" fill="context-stroke" />
+          </marker>
+          <marker id="dsl-preview-diamond" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+            <path d="M 1 5 L 5 1 L 9 5 L 5 9 Z" fill="context-stroke" />
+          </marker>
+        </defs>
+        {document.edges.map((edge) => {
+          const style = edgeDefaults(edge);
+          const marker = style.endArrow === "none" ? undefined : `url(#dsl-preview-${style.endArrow})`;
+          return <path key={edge.id} d={pathFor(edge)} fill="none" stroke={edge.stroke} strokeWidth={edge.strokeWidth} strokeDasharray={style.strokeStyle === "dashed" ? "8 5" : undefined} opacity={style.opacity} markerStart={style.startArrow === "none" ? undefined : `url(#dsl-preview-${style.startArrow})`} markerEnd={marker} />;
+        })}
         {elements.map((element) => (
           <g
             key={element.id}
@@ -7166,7 +7260,7 @@ function SettingsDialog({
       apiPath: String(model.extra_config?.api_path || ""),
       contextWindow: Number(model.extra_config?.context_window || 128000),
       maxOutputTokens: Number(model.extra_config?.max_output_tokens || 32768),
-      visionCapable: model.extra_config?.vision_capable !== false,
+      visionCapable: model.extra_config?.vision_capable === true,
       isDefault: Boolean(model.is_default),
     });
   };

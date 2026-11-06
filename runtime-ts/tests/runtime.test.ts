@@ -1,8 +1,16 @@
+import {AgentRuntimeCore} from '../src/agentLoop.js'
+import type {DomainAdapter} from '../src/domainObservation.js'
+import {queryFixture} from './fixtures/queryDomain.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { jsPDF } from 'jspdf'
+import type {RuntimeExecutionServices} from '../src/toolExecutionPolicies.js'
+import {FileEvidenceStore} from '../src/fileEvidenceStore.js'
+import {compactConversation} from '../src/contextCompaction.js'
+import {assertToolPairs} from '../src/resultProjection.js'
+import {RuntimeRepository} from '../src/repository.js'
 import { TuGoRuntime } from '../src/runtime.js'
 import type { RuntimeToHost } from '../src/contracts.js'
 
@@ -13,6 +21,7 @@ const promptTemplates = [
   { name: 'runtime.system', content: '{{agent_soul}}{{conversation_summary}}\nTools: {{tool_names}}', version: 'test' },
   { name: 'runtime.context', content: 'Runtime: {{runtime_context}}\nAttachments: {{attachment_context}}{{conversation_summary}}', version: 'test' },
   { name: 'runtime.summarize', content: 'Summarize facts.', version: 'test' },
+  { name: 'runtime.session_title', content: 'Short title.', version: 'test' },
   { name: 'runtime.retry', content: 'Retry with valid JSON.', version: 'test' },
   { name: 'runtime.attachment_note', content: 'Attachments: {{attachment_ids}}', version: 'test' },
   { name: 'runtime.conversation_summary', content: '<conversation_summary>{{summary}}</conversation_summary>', version: 'test' },
@@ -31,28 +40,30 @@ const promptTemplates = [
   { name: 'middleware.loop_frequency_warning', content: 'Too many {{tool_name}} calls: {{count}}.', version: 'test' },
 ]
 
-const createRuntime = async (messages: RuntimeToHost[], options: { maxAttempts?: number } = {}) => {
+const createRuntime = async (messages: RuntimeToHost[], options: { observeTool?:boolean; coreOnly?:boolean; domains?:readonly DomainAdapter[]; modelExtra?:Record<string,unknown>; middleware?:Record<string,unknown>; maxAttempts?: number; loopDetection?: Record<string, unknown>; observation?: Record<string,unknown>; execution?:RuntimeExecutionServices; toolTimeoutMs?:number; host?:(message:Extract<RuntimeToHost,{kind:'tool_call'}>,runtime:TuGoRuntime)=>boolean } = {}) => {
   const root = await mkdtemp(join(tmpdir(), 'tugo-loop-test-')); roots.push(root)
   const defaults = join(root, 'defaults.json')
   await writeFile(defaults, JSON.stringify({ templateVersion: '1', providers: [{ provider_id: 'openai', display_name: 'OpenAI' }], promptTemplates, tools: [
-    { name: 'board_get_state', description: 'state', handlerKey: 'board-bridge', inputSchema: { type: 'object', required: ['project_id'], properties: { project_id: { type: 'string' } }, additionalProperties: false } },
-    { name: 'board_batch', description: 'batch', handlerKey: 'board-bridge', inputSchema: { type: 'object', required: ['project_id', 'operations'], properties: { project_id: { type: 'string' }, operations: { type: 'array', items: { type: 'object' } } }, additionalProperties: false } },
+    { name: 'board_get_state', timeoutMs:options.toolTimeoutMs||30000, description: 'state', handlerKey: 'board-bridge', inputSchema: { type: 'object', required: ['project_id'], properties: { project_id: { type: 'string' } }, additionalProperties: false } },
+    { name: 'board_batch', timeoutMs:options.toolTimeoutMs||30000, description: 'batch', handlerKey: 'board-bridge', inputSchema: { type: 'object', required: ['project_id', 'operations'], properties: { project_id: { type: 'string' }, operations: { type: 'array', items: { type: 'object' } } }, additionalProperties: false } },
     { name: 'board_capture_image', description: 'capture board image', handlerKey: 'board-bridge', inputSchema: { type: 'object', required: ['project_id'], properties: { project_id: { type: 'string' } }, additionalProperties: false } },
     { name: 'view_image', description: 'view image', handlerKey: 'view-image', inputSchema: { type: 'object', required: ['attachment_id'], properties: { attachment_id: { type: 'string' } }, additionalProperties: false } },
     { name: 'plan', description: 'plan', handlerKey: 'plan', inputSchema: { type: 'object', required: ['steps'], properties: { title: { type: 'string' }, steps: { type: 'array', items: { type: 'object' } } } } },
+    ...(options.observeTool?[{name:'board_observe',description:'observe',handlerKey:'board-observe',inputSchema:{type:'object',properties:{}}}]:[]),
     { name: 'load_skill', description: 'skill', handlerKey: 'load-skill', inputSchema: { type: 'object', required: ['skill_id'], properties: { skill_id: { type: 'string' } } } },
     { name: 'read_file', description: 'read attachment', handlerKey: 'read-file', inputSchema: { type: 'object', required: ['attachment_id'], properties: { attachment_id: { type: 'string' } }, additionalProperties: false } },
-  ], skill: { slug: 'tugo-architect', version: '1', description: 'canvas skill', content: 'full skill instructions' }, agent: { name: 'tugo-architect', display_name: 'Agent', soul: 'system', tool_names: ['board_get_state', 'board_batch', 'board_capture_image', 'view_image', 'plan', 'load_skill', 'read_file'], skill_slugs: ['tugo-architect'], middleware: { plan: { enabled: true, mode: 'optional' }, title: { enabled: false }, maxSteps: 12, modelRetry: { maxAttempts: options.maxAttempts ?? 1 } } } }))
+  ], skill: { slug: 'tugo-architect', version: '1', description: 'canvas skill', content: 'full skill instructions' }, agent: { name: 'tugo-architect', display_name: 'Agent', soul: 'system', tool_names: ['board_get_state', 'board_batch', 'board_capture_image', 'view_image', 'plan', 'load_skill', 'read_file',...(options.observeTool?['board_observe']:[])], skill_slugs: ['tugo-architect'], middleware: { plan: { enabled: true, mode: 'optional' }, title: { enabled: false }, maxSteps: 12, modelRetry: { maxAttempts: options.maxAttempts ?? 1 }, ...(options.loopDetection ? { loopDetection: options.loopDetection } : {}), ...options.middleware } } }))
   let runtime!: TuGoRuntime
-  runtime = new TuGoRuntime(root, defaults, message => {
+  runtime = new (options.coreOnly?AgentRuntimeCore:TuGoRuntime)(root, defaults, message => {
     messages.push(message)
-    if (message.kind === 'tool_call') runtime.resolveHostTool({ kind: 'tool_result', id: message.id, result: message.name === 'board_capture_image'
+    if(message.kind==='tool_call'&&options.host?.(message,runtime))return
+    if (message.kind === 'tool_call') runtime.resolveHostTool({ kind: 'tool_result', id: message.id, result: ['board_observe','board_get_observation'].includes(message.name) && options.observation ? {ok:true,observation:options.observation} : message.name === 'board_capture_image'
       ? { ok: true, mime_type: 'image/png', image_base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL1OwAAAABJRU5ErkJggg==', region: { x: 0, y: 0, width: 1, height: 1 } }
       : { ok: true } })
-  })
+  },options.execution,options.domains)
   await runtime.start()
   runtime.setSecrets({ 'test-secret': 'TUGO_TEST_SECRET_SHOULD_NOT_PERSIST_42' })
-  const model = await runtime.http('POST', '/api/models', { name: 'test', provider_id: 'openai', model: 'test', display_name: 'Test', extra_config: { api_key_ref: 'test-secret', base_url: 'https://example.test/v1' } }) as Record<string, unknown>
+  const model = await runtime.http('POST', '/api/models', { name: 'test', provider_id: 'openai', model: 'test', display_name: 'Test', extra_config: { api_key_ref: 'test-secret', base_url: 'https://example.test/v1', vision_capable:true, ...options.modelExtra } }) as Record<string, unknown>
   runtime.repository.recordModelProbe(String(model.model_id), true, 'test fixture')
   const resources = await runtime.http('POST', '/api/runtime/bootstrap', { model_id: model.model_id }) as { agent: Record<string, unknown> }
   return { runtime, agentId: String(resources.agent.agent_id), root }
@@ -66,6 +77,438 @@ const waitForEnd = (messages: RuntimeToHost[], subscription: string) => new Prom
 })
 
 describe('TuGoRuntime loop', () => {
+  it('finishes stalled quality repairs as partial, closes a queued batch and never executes later writes',async()=>{
+    let round=0,observations=0,writes=0
+    const call=(id:string,name:string,args:unknown)=>({index:0,id,function:{name,arguments:JSON.stringify(args)}})
+    const write=(id:string)=>call(id,'board_batch',{operations:[{op:'add_element',element:{id:'n',kind:'rectangle',text:'N'}}]})
+    vi.stubGlobal('fetch',vi.fn(async()=>{
+      round++
+      const calls=round%2?[write('w'+round)]:[call('o'+round,'board_observe',{})]
+      if(round===6)calls.push({...write('must-not-run'),index:1})
+      return sse([{choices:[{delta:{tool_calls:calls},finish_reason:'tool_calls'}]}])
+    }))
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{observeTool:true,host:(m,r)=>{
+      if(m.name==='board_batch'){writes++;r.resolveHostTool({kind:'tool_result',id:m.id,result:{ok:true}});return true}
+      if(m.name==='board_observe'){
+        observations++;r.resolveHostTool({kind:'tool_result',id:m.id,result:{ok:true,observation:{observation_id:'stable-'+observations,project_id:'p1',verdict:'needs_decision',checks:{render:'failed',geometry:'passed'},blocking_count:1,findings:[{type:'label_over_text',severity:'blocking',refs:['e','n'],message:'标签挡标题',measure:{kind:'overlap_fraction',value:.8}}]}}});return true
+      }
+      return false
+    }})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    const run=runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'修复标签，不要重画',subscription_id:'quality-partial'});await waitForEnd(messages,'quality-partial')
+    expect(round).toBe(6);expect(observations).toBe(3);expect(writes).toBe(3)
+    const terminal=messages.find(m=>m.kind==='event'&&m.event.type==='session.completed')
+    expect(terminal?.kind==='event'&&terminal.event.payload).toMatchObject({status:'partial',completion_reason:'QUALITY_REPAIR_STALLED',delivery_verification:{passed:false}})
+    expect(messages.some(m=>m.kind==='event'&&m.event.type==='session.failed')).toBe(false)
+    const denied=runtime.repository.toolCallResult(run.run_id,'must-not-run')!
+    expect(denied.status).toBe('failed');expect(JSON.parse(String(denied.result_json)).result.execution.state).toBe('not_started')
+    expect(()=>assertToolPairs(runtime.repository.latestCheckpoint(thread.thread_id)!.messages)).not.toThrow()
+    expect(runtime.repository.runTrace(thread.thread_id,run.run_id).failure).toBeNull()
+    await runtime.close()
+  })
+  it('does not reuse a client compaction branch after switching to server-managed conversation state',async()=>{
+    const bodies:Record<string,unknown>[]=[]
+    vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{bodies.push(JSON.parse(String(init?.body)));return sse([{choices:[{delta:{content:'完成'},finish_reason:'stop'}]}])}))
+    const messages:RuntimeToHost[]=[];const {runtime,agentId}=await createRuntime(messages,{modelExtra:{request_options:{conversation:'provider-state'}}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    const old='旧结果'.repeat(4000)
+    await runtime.http('PUT',`/api/threads/${thread.thread_id}/context`,{messages:[{role:'user',content:'约束'},{role:'assistant',content:old}]})
+    const checkpoint=runtime.repository.latestCheckpoint(thread.thread_id)!
+    const projected=await compactConversation({messages:checkpoint.messages,force:true,signal:new AbortController().signal,persist:async()=> 'fixture-ref',estimate:m=>JSON.stringify(m).length,target:100,keepRecent:1})
+    checkpoint.middlewareState={contextCompaction:projected!.state};runtime.repository.saveCheckpoint(checkpoint)
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'继续',subscription_id:'stateful'});await waitForEnd(messages,'stateful')
+    expect(bodies).toHaveLength(1)
+    expect((bodies[0].messages as Record<string,unknown>[]).some(m=>m.content===old)).toBe(true)
+    expect(JSON.stringify(bodies[0])).not.toContain('运行时上下文续接检查点')
+    await runtime.close()
+  })
+  it.each([false,true])('recovers a provider context rejection once, never replaying completed tools; rejectsAgain=%s',async rejectsAgain=>{
+    const bodies:Record<string,unknown>[]=[],tools:string[]=[]
+    vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
+      bodies.push(JSON.parse(String(init?.body)))
+      if(bodies.length===1)return sse([{choices:[{delta:{reasoning_content:'思考'.repeat(4000),tool_calls:[{index:0,id:'once',function:{name:'board_get_state',arguments:'{}'}}]},finish_reason:'tool_calls'}]}])
+      if(bodies.length===2||rejectsAgain)return new Response(JSON.stringify({error:{code:'context_length_exceeded',message:'maximum context length exceeded'}}),{status:400})
+      return sse([{choices:[{delta:{content:'继续完成'},finish_reason:'stop'}]}])
+    }))
+    const messages:RuntimeToHost[]=[];const {runtime,agentId}=await createRuntime(messages,{host:m=>{tools.push(m.name);return false}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'不得删除节点',subscription_id:'overflow-once'});await waitForEnd(messages,'overflow-once')
+    expect(bodies).toHaveLength(3);expect(tools.filter(n=>n==='board_get_state')).toHaveLength(1)
+    expect((bodies[2].messages as Record<string,unknown>[]).some(m=>String(m.content).includes('运行时上下文续接检查点'))).toBe(true)
+    expect(messages.some(m=>m.kind==='event'&&m.event.type===(rejectsAgain?'session.failed':'session.completed'))).toBe(true)
+    expect(runtime.repository.listJournal(thread.thread_id).filter(j=>j.event_type==='context.overflow_recovered')).toHaveLength(1)
+    await runtime.close()
+  })
+  it('continues a 35-tool context trajectory, preserves constraints and archives, and resumes from disk without replay',async()=>{
+    const goal='持续检查；约束：不得删除已有节点',bodies:Record<string,unknown>[]=[],tools:string[]=[]
+    const data=Array.from({length:1000},(_,i)=>`${i.toString(36)}:${(i*7919).toString(36)};`).join('')
+    vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
+      bodies.push(JSON.parse(String(init?.body)));const n=bodies.length
+      if(n<=35)return sse([{choices:[{delta:{tool_calls:[{index:0,id:`trajectory-${n}`,function:{name:'board_get_state',arguments:'{}'}}]},finish_reason:'tool_calls'}]}])
+      return sse([{choices:[{delta:{content:'已完成'},finish_reason:'stop'}]}])
+    }))
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId,root}=await createRuntime(messages,{loopDetection:{enabled:false},modelExtra:{context_window:16384,max_output_tokens:1024},middleware:{maxLoops:45,maxToolCalls:45,maxProcessingActions:300},host:(m,r)=>{
+      if(m.name!=='board_get_state')return false
+      tools.push(m.id);r.resolveHostTool({kind:'tool_result',id:m.id,result:{detail:data,reading:tools.length}});return true
+    }})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:goal,subscription_id:'trajectory'})
+    // This deliberately long fixture has its own bounded wait, not a relaxation
+    // of the existing per-run assertions or the production execution budget.
+    for(let i=0;i<600&&!messages.some(m=>m.kind==='stream_end'&&m.subscription_id==='trajectory');i++)await new Promise(r=>setTimeout(r,20))
+    expect(messages.some(m=>m.kind==='event'&&m.event.type==='session.completed')).toBe(true)
+    expect(bodies).toHaveLength(36);expect(tools).toHaveLength(35);expect(new Set(tools).size).toBe(35)
+    for(const b of bodies)expect((b.messages as Record<string,unknown>[]).some(m=>m.role==='user'&&m.content===goal)).toBe(true)
+    const state=runtime.repository.latestCheckpoint(thread.thread_id)!,compaction=state.middlewareState?.contextCompaction as Record<string,unknown>
+    expect(compaction.generation).toBeGreaterThan(2);expect(state.messages.filter(m=>m.role==='tool')).toHaveLength(35)
+    const store=new FileEvidenceStore(join(root,'evidence-v1'))
+    let ref=String(compaction.ref),archived=0
+    while(ref){const scope=(state.middlewareState?.contextEvidence as Record<string,any>)[ref],entry=await store.get(ref,scope),payload=entry.payload as Record<string,unknown>;archived+=(payload.messages as any[]).filter(m=>m.role==='tool').length;ref=String(payload.previous_ref??'')}
+    expect(archived).toBeGreaterThan(25)
+    await runtime.close()
+    const resumed:RuntimeToHost[]=[],second=new TuGoRuntime(root,join(root,'defaults.json'),m=>resumed.push(m));await second.start();second.setSecrets({'test-secret':'TUGO_TEST_SECRET_SHOULD_NOT_PERSIST_42'})
+    second.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'继续核对，不要重放',subscription_id:'resumed'});await waitForEnd(resumed,'resumed')
+    expect(resumed.some(m=>m.kind==='event'&&m.event.type==='session.completed')).toBe(true);expect(tools).toHaveLength(35)
+    expect(second.repository.latestCheckpoint(thread.thread_id)?.messages.some(m=>m.content===goal)).toBe(true)
+    await second.close()
+  },20000)
+  it('recovers the pre-fix single-response failed checkpoint from trusted receipts without replaying its tool',async()=>{
+    const reasoning='长思考'.repeat(7311),bodies:Record<string,unknown>[]=[],hostCalls:string[]=[]
+    vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
+      bodies.push(JSON.parse(String(init?.body)))
+      if(bodies.length===1)return sse([{choices:[{delta:{reasoning_content:reasoning,tool_calls:[{index:0,id:'legacy-thought',function:{name:'board_get_state',arguments:'{}'}}]},finish_reason:'tool_calls'}],usage:{prompt_tokens:11858,completion_tokens:20814,total_tokens:32672}}])
+      if(bodies.length===2)throw new Error('fixture transport interruption')
+      return sse([{choices:[{delta:{content:'恢复完成'},finish_reason:'stop'}]}])
+    }))
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{maxAttempts:1,modelExtra:{context_window:100000,max_output_tokens:32768},host:m=>{hostCalls.push(m.name);return false}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'画图',subscription_id:'legacy-first'});await waitForEnd(messages,'legacy-first')
+    const checkpoint=runtime.repository.latestCheckpoint(thread.thread_id)!
+    expect(checkpoint.status).toBe('failed')
+    delete checkpoint.middlewareState!.outputUsageLedger // exact pre-upgrade shape
+    runtime.repository.saveCheckpoint(checkpoint)
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'继续',subscription_id:'legacy-resume'});await waitForEnd(messages,'legacy-resume')
+    expect(bodies).toHaveLength(3);expect(hostCalls.filter(n=>n==='board_get_state')).toHaveLength(1)
+    expect(messages.some(m=>m.kind==='event'&&m.subscription_id==='legacy-resume'&&m.event.type==='session.completed')).toBe(true)
+    expect((bodies[2].messages as Record<string,unknown>[]).find(m=>m.role==='assistant')?.reasoning_content).toBe(reasoning)
+    await runtime.close()
+  })
+  it('uses the reference estimator when usage is missing, retaining the full thought/tool turn',async()=>{
+    let requests=0
+    const fetch=vi.fn(async()=>++requests===1?sse([{choices:[{delta:{reasoning_content:'长思考'.repeat(7311),tool_calls:[{index:0,id:'unmeasured',function:{name:'board_get_state',arguments:'{}'}}]},finish_reason:'tool_calls'}]}]):sse([{choices:[{delta:{content:'完成'},finish_reason:'stop'}]}]));vi.stubGlobal('fetch',fetch)
+    const messages:RuntimeToHost[]=[];const {runtime,agentId}=await createRuntime(messages,{modelExtra:{context_window:100000,max_output_tokens:32768}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'画图',subscription_id:'unmeasured'});await waitForEnd(messages,'unmeasured')
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(messages.some(m=>m.kind==='event'&&m.event.type==='session.completed')).toBe(true)
+    expect(runtime.repository.listJournal(thread.thread_id).filter(j=>j.event_type==='context.projection').at(-1)?.payload).toMatchObject({estimator:'reference-bpe-with-margin-v1',admitted:true})
+    await runtime.close()
+  })
+  it('continues after a long measured reasoning response and preserves its complete tool protocol',async()=>{
+    const reasoning='长思考'.repeat(7311),bodies:Record<string,unknown>[]=[]
+    vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
+      bodies.push(JSON.parse(String(init?.body)))
+      if(bodies.length===1)return sse([{choices:[{delta:{reasoning_content:reasoning,tool_calls:[{index:0,id:'long-thought',function:{name:'board_get_state',arguments:'{}'}}]},finish_reason:'tool_calls'}],usage:{prompt_tokens:11858,completion_tokens:20814,total_tokens:32672}}])
+      return sse([{choices:[{delta:{content:'完成'},finish_reason:'stop'}]}])
+    }))
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{modelExtra:{context_window:100000,max_output_tokens:32768}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'画图',subscription_id:'measured-thought'});await waitForEnd(messages,'measured-thought')
+    expect(bodies).toHaveLength(2)
+    const echo=(bodies[1].messages as Record<string,unknown>[]).find(m=>m.role==='assistant')!
+    expect(echo.reasoning_content).toBe(reasoning);expect(echo.tool_calls).toHaveLength(1)
+    expect((bodies[1].messages as Record<string,unknown>[]).some(m=>m.role==='tool'&&m.tool_call_id==='long-thought')).toBe(true)
+    const decisions=runtime.repository.listJournal(thread.thread_id).filter(j=>j.event_type==='context.projection')
+    expect(decisions[1]?.payload).toMatchObject({admitted:true,estimator:'measured-output-echo-v1',measuredMessages:1,partitions:{outputReserve:32768}})
+    expect(messages.some(m=>m.kind==='event'&&m.event.type==='session.completed')).toBe(true)
+    await runtime.close()
+  })
+  it('admits the final middleware-expanded request and records text/tool/output partitions',async()=>{
+    const fetch=vi.fn(async()=>sse([{choices:[{delta:{content:'完成'},finish_reason:'stop'}]}]));vi.stubGlobal('fetch',fetch)
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{modelExtra:{context_window:32768,max_output_tokens:1024,context_safety_ratio:.9}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'列出明细，不要汇总',subscription_id:'budget-ok'});await waitForEnd(messages,'budget-ok')
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const entry=runtime.repository.listJournal(thread.thread_id).find(x=>x.event_type==='context.projection')
+    expect(entry?.payload).toMatchObject({admitted:true,safeBudget:Math.floor(32768*.9),partitions:{outputReserve:1024,system:expect.any(Number),toolDefinitions:expect.any(Number)}})
+    expect(JSON.stringify(entry?.payload)).not.toContain('列出明细')
+    expect(messages.some(x=>x.kind==='event'&&x.event.type==='session.completed')).toBe(true)
+    await runtime.close()
+  })
+  it('stops oversized context before any network call without changing the user request',async()=>{
+    const fetch=vi.fn();vi.stubGlobal('fetch',fetch)
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{modelExtra:{context_window:8192,max_output_tokens:512}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    const content='约束不可丢失'.repeat(3000)
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content,subscription_id:'budget-stop'});await waitForEnd(messages,'budget-stop')
+    expect(fetch).not.toHaveBeenCalled()
+    expect(runtime.repository.latestCheckpoint(thread.thread_id)?.messages.find(x=>x.role==='user')?.content).toBe(content)
+    expect(runtime.repository.listJournal(thread.thread_id).find(x=>x.event_type==='context.projection')?.payload).toMatchObject({admitted:false,reason:'context_exceeds_safe_budget'})
+    expect(messages.some(x=>x.kind==='event'&&x.event.type==='session.failed')).toBe(true)
+    await runtime.close()
+  })
+  it('rechecks admission after retry instructions are appended',async()=>{
+    let count=0;const fetch=vi.fn(async()=>{count++;if(count===1)throw new TypeError('fetch failed');return sse([{choices:[{delta:{content:'完成'},finish_reason:'stop'}]}])});vi.stubGlobal('fetch',fetch)
+    const messages:RuntimeToHost[]=[];const {runtime,agentId}=await createRuntime(messages,{maxAttempts:2})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'hello',subscription_id:'budget-retry'});await waitForEnd(messages,'budget-retry')
+    expect(fetch).toHaveBeenCalledTimes(2)
+    const entries=runtime.repository.listJournal(thread.thread_id).filter(x=>x.event_type==='context.projection')
+    expect(entries).toHaveLength(2)
+    expect(Number((entries[1].payload as Record<string,unknown>).estimatedUnits)).toBeGreaterThan(Number((entries[0].payload as Record<string,unknown>).estimatedUnits))
+    await runtime.close()
+  })
+  it('retains authoritative history instead of trusting an LLM summary, and still budgets title calls',async()=>{
+    const fetch=vi.fn(async()=>sse([{choices:[{delta:{content:'完成'},finish_reason:'stop'}]}]));vi.stubGlobal('fetch',fetch)
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{middleware:{title:{enabled:true},summarization:{enabled:true,triggerRatio:.001,keepRecentMessages:2}}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    await runtime.http('PUT',`/api/threads/${thread.thread_id}/context`,{messages:[{role:'user',content:'旧任务'.repeat(100)},{role:'assistant',content:'旧结果'.repeat(100)},{role:'user',content:'补充'.repeat(100)},{role:'assistant',content:'答复'.repeat(100)}]})
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'hello',subscription_id:'aux-budget'});await waitForEnd(messages,'aux-budget')
+    const entries=runtime.repository.listJournal(thread.thread_id).filter(x=>x.event_type==='context.projection')
+    expect(entries.map(x=>x.actor)).toEqual(['agent_loop','session_title'])
+    expect(runtime.repository.latestCheckpoint(thread.thread_id)?.messages[0].content).toBe('旧任务'.repeat(100))
+    expect(fetch).toHaveBeenCalledTimes(2)
+    for(const entry of entries){const d=entry.payload as Record<string,unknown>;expect(d.admitted).toBe(true);expect(Number(d.estimatedUnits)).toBeLessThanOrEqual(Number(d.safeBudget))}
+    await runtime.close()
+  })
+  it('returns referenced rows and restores a requested detail through the real model tool loop',async()=>{
+    const bodies:Record<string,unknown>[]=[],rows=Array.from({length:1000},(_,id)=>({id,text:'数据'+id}));let writes=0
+    vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
+      const body=JSON.parse(String(init?.body||'{}'));bodies.push(body)
+      if(bodies.length===1)return sse([{choices:[{delta:{tool_calls:[{index:0,id:'query-rows',function:{name:'board_get_state',arguments:'{}'}}]},finish_reason:'tool_calls'}]}])
+      const toolMessages=body.messages.filter((m:Record<string,unknown>)=>m.role==='tool')
+      if(bodies.length===2){
+        const projected=JSON.parse(toolMessages[0].content)
+        expect(projected.rows).toEqual([]);expect(projected.constraint).toBe('不得修改锁定对象')
+        expect(projected.projection.record.execution.state).toBe('succeeded')
+        expect(projected.projection.record.validity).toBe('unknown')
+        expect(body.tools.some((t:{function:{name:string}})=>t.function.name==='runtime_read_evidence')).toBe(true)
+        return sse([{choices:[{delta:{tool_calls:[{index:0,id:'detail',function:{name:'runtime_read_evidence',arguments:JSON.stringify({evidence_ref:projected.projection.evidenceRef,path:['rows'],offset:999,limit:1})}}]},finish_reason:'tool_calls'}]}])
+      }
+      const detail=JSON.parse(toolMessages.at(-1).content);expect(detail.page.items).toEqual([rows[999]]);expect(detail.page.storedTotal).toBe(1000)
+      return sse([{choices:[{delta:{content:'最后一行是数据999'},finish_reason:'stop'}]}])
+    }))
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{host:(m,r)=>{if(m.name!=='board_get_state')return false;writes++;r.resolveHostTool({kind:'tool_result',id:m.id,result:{rows,constraint:'不得修改锁定对象'}});return true}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'查看最后一行明细，不要修改任何对象',subscription_id:'evidence-detail'});await waitForEnd(messages,'evidence-detail')
+    expect(writes).toBe(1);expect(bodies).toHaveLength(3);expect(messages.some(x=>x.kind==='event'&&x.event.type==='session.completed')).toBe(true)
+    expect(runtime.repository.latestCheckpoint(thread.thread_id)?.messages[0].content).toBe('查看最后一行明细，不要修改任何对象')
+    await runtime.close()
+  })
+  it('does not authorize an invented evidence reference or dispatch it to a host tool',async()=>{
+    let n=0,host=0
+    vi.stubGlobal('fetch',vi.fn(async()=>sse([{choices:[++n===1?{delta:{tool_calls:[{index:0,id:'forged',function:{name:'runtime_read_evidence',arguments:JSON.stringify({evidence_ref:'invented'})}}]},finish_reason:'tool_calls'}:{delta:{content:'no'},finish_reason:'stop'}]}])))
+    const messages:RuntimeToHost[]=[];const {runtime,agentId}=await createRuntime(messages,{host:()=>{host++;return false}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'读取引用',subscription_id:'bad-ref'});await waitForEnd(messages,'bad-ref')
+    expect(host).toBe(0);expect(messages.some(x=>x.kind==='event'&&x.event.type==='session.failed')).toBe(true);await runtime.close()
+  })
+  it('denies another thread reference even when the reader has its own authorized evidence',async()=>{
+    const refs:Record<string,string>={},counts:Record<string,number>={};let hostCalls=0,denied=false
+    vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
+      const body=JSON.parse(String(init?.body||'{}')),group=body.messages.find((m:Record<string,unknown>)=>m.role==='user').content as string
+      const turn=counts[group]=(counts[group]||0)+1
+      if(turn===1)return sse([{choices:[{delta:{tool_calls:[{index:0,id:'rows-'+group,function:{name:'board_get_state',arguments:'{}'}}]},finish_reason:'tool_calls'}]}])
+      const outputs=body.messages.filter((m:Record<string,unknown>)=>m.role==='tool')
+      if(turn===2){refs[group]=JSON.parse(outputs[0].content).projection.evidenceRef
+        if(group==='B')return sse([{choices:[{delta:{tool_calls:[{index:0,id:'steal',function:{name:'runtime_read_evidence',arguments:JSON.stringify({evidence_ref:refs.A,path:['rows'],limit:1})}}]},finish_reason:'tool_calls'}]}])
+      }
+      if(group==='B'&&turn===3){expect(outputs.at(-1).content).toContain('forbidden');denied=true}
+      return sse([{choices:[{delta:{content:'完成'},finish_reason:'stop'}]}])
+    }))
+    const messages:RuntimeToHost[]=[];const {runtime,agentId}=await createRuntime(messages,{host:(m,r)=>{if(m.name!=='board_get_state')return false;hostCalls++;r.resolveHostTool({kind:'tool_result',id:m.id,result:{rows:Array.from({length:1000},(_,id)=>({id}))}});return true}})
+    for(const group of ['A','B']){const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'same-board'}}) as {thread_id:string};runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:group,subscription_id:'scope-'+group});await waitForEnd(messages,'scope-'+group)}
+    expect(denied).toBe(true);expect(refs.A).not.toBe(refs.B);expect(hostCalls).toBe(2);await runtime.close()
+  })
+  it('recovers an authorized detail after runtime restart without rerunning the original tool',async()=>{
+    let ref='',turn=0,hostCalls=0
+    vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
+      const body=JSON.parse(String(init?.body||'{}'));turn++
+      if(turn===1)return sse([{choices:[{delta:{tool_calls:[{index:0,id:'original-read',function:{name:'board_get_state',arguments:'{}'}}]},finish_reason:'tool_calls'}]}])
+      const outputs=body.messages.filter((m:Record<string,unknown>)=>m.role==='tool')
+      if(turn===2){ref=JSON.parse(outputs[0].content).projection.evidenceRef;return sse([{choices:[{delta:{content:'引用已准备'},finish_reason:'stop'}]}])}
+      if(turn===3)return sse([{choices:[{delta:{tool_calls:[{index:0,id:'after-restart',function:{name:'runtime_read_evidence',arguments:JSON.stringify({evidence_ref:ref,path:['rows'],offset:999,limit:1})}}]},finish_reason:'tool_calls'}]}])
+      expect(JSON.parse(outputs.at(-1).content).page.items).toEqual([{id:999}])
+      return sse([{choices:[{delta:{content:'明细已恢复'},finish_reason:'stop'}]}])
+    }))
+    const messages:RuntimeToHost[]=[];const {runtime,root,agentId}=await createRuntime(messages,{host:(m,r)=>{if(m.name!=='board_get_state')return false;hostCalls++;r.resolveHostTool({kind:'tool_result',id:m.id,result:{rows:Array.from({length:1000},(_,id)=>({id}))}});return true}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'读取',subscription_id:'before-restart'});await waitForEnd(messages,'before-restart');await runtime.close()
+    const reopened=new TuGoRuntime(root,join(root,'defaults.json'),m=>messages.push(m));await reopened.start();reopened.setSecrets({'test-secret':'TUGO_TEST_SECRET_SHOULD_NOT_PERSIST_42'})
+    reopened.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'取回原引用明细',subscription_id:'after-restart'});await waitForEnd(messages,'after-restart')
+    expect(turn).toBe(4);expect(hostCalls).toBe(1);expect(messages.some(x=>x.kind==='event'&&x.subscription_id==='after-restart'&&x.event.type==='session.completed')).toBe(true);await reopened.close()
+  })
+  it.each([false,null])('suppresses visual inputs and discloses limitations for capability %s without switching model',async vision=>{
+    const bodies:Record<string,unknown>[]=[]
+    vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{bodies.push(JSON.parse(String(init?.body||'{}')));return sse([{choices:[{delta:{content:'只能依据文字继续'},finish_reason:'stop'}]}])}))
+    const messages:RuntimeToHost[]=[];const {runtime,agentId,root}=await createRuntime(messages,{modelExtra:{vision_capable:vision}})
+    const path=join(root,'reference.png');await writeFile(path,Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL1OwAAAABJRU5ErkJggg==','base64'))
+    const attachment=await runtime.http('POST','/api/attachments/import',{path}) as {attachment_id:string}
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'请结合图片分析',attachment_ids:[attachment.attachment_id],subscription_id:'nonvisual-1'});await waitForEnd(messages,'nonvisual-1')
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'继续',subscription_id:'nonvisual-2'});await waitForEnd(messages,'nonvisual-2')
+    expect(bodies).toHaveLength(2)
+    for(const body of bodies){expect(JSON.stringify(body.messages)).not.toContain('data:image/');expect(JSON.stringify(body.messages)).toContain('不得声称看到了');const names=(body.tools as Array<{function:{name:string}}>).map(t=>t.function.name);expect(names).not.toContain('view_image');expect(names).not.toContain('board_capture_image');expect(names).toContain('board_get_state');expect(body.model).toBe('test')}
+    const completed=messages.filter(m=>m.kind==='event'&&m.event.type==='agent.message.completed')
+    expect(completed).toHaveLength(2);expect(JSON.stringify(completed)).toContain('未向模型发送');expect(JSON.stringify(completed)).toContain('未自动切换模型')
+    expect(runtime.repository.listJournal(thread.thread_id).filter(x=>x.event_type==='context.modality')[0].payload).toMatchObject({mode:vision===false?'text':'unknown',omitted_images:1,model_changed:false})
+    expect(runtime.repository.latestCheckpoint(thread.thread_id)?.messages.find(m=>m.role==='user')?.attachmentIds).toEqual([attachment.attachment_id])
+    await runtime.close()
+  })
+  it.each(['complete','page','partial','summary'] as const)('runs a registered non-drawing %s query through the ordinary ledger and evidence path',async mode=>{
+    const fixture=queryFixture({mode:mode==='summary'?'page':mode,knownTotal:mode!=='partial'}),bodies:Record<string,unknown>[]=[]
+    vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
+      const body=JSON.parse(String(init?.body||'{}'));bodies.push(body)
+      if(bodies.length===1)return sse([{choices:[{delta:{tool_calls:[{index:0,id:'domain-query',function:{name:'fixture_query',arguments:JSON.stringify({representation:mode==='summary'?'summary':'detail',limit:5})}}]},finish_reason:'tool_calls'}]}])
+      const value=JSON.parse(body.messages.find((m:Record<string,unknown>)=>m.role==='tool').content)
+      expect(value.domainEvidence.range.kind).toBe(mode);expect(value.projection.record.range.kind).toBe(mode)
+      expect(value.projection.kind).toBe('full');expect(value.projection.evidenceRef).toMatch(/^evidence:/)
+      expect(value.data.rows).toEqual(mode==='complete'?fixture.rows:mode==='summary'?[]:fixture.rows.slice(0,5))
+      if(mode==='partial')expect(value.domainEvidence.range).not.toHaveProperty('total')
+      if(mode==='summary'){expect(value.note).toContain('尚未交付明细');expect(value.detail.args.representation).toBe('detail')}
+      return sse([{choices:[{delta:{content:'已按标明范围返回'},finish_reason:'stop'}]}])
+    }))
+    const messages:RuntimeToHost[]=[];const {runtime,agentId,root}=await createRuntime(messages,{coreOnly:true,domains:[fixture.adapter]})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId}) as {thread_id:string}
+    const run=runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'查询数据，保留结果范围',subscription_id:'query-domain'});await waitForEnd(messages,'query-domain')
+    expect(bodies).toHaveLength(2);expect(fixture.calls).toBe(1);expect(messages.filter(m=>m.kind==='tool_call')).toHaveLength(0)
+    expect(runtime.repository.toolCallResult(run.run_id,'domain-query')?.status).toBe('succeeded')
+    expect(runtime.repository.listJournal(thread.thread_id).some(x=>x.event_type==='tool.execution.before')).toBe(true)
+    const content=runtime.repository.latestCheckpoint(thread.thread_id)?.messages.find(m=>m.role==='tool')?.content||'{}',ref=JSON.parse(content).projection.evidenceRef
+    const entry=await new FileEvidenceStore(join(root,'evidence-v1')).get(ref,{applicationId:'fixture.query',workspaceId:thread.thread_id,runId:run.run_id,conversationId:thread.thread_id})
+    expect(entry.record.range.kind).toBe(mode);expect(entry.record.source.layer).toBe('domain');await runtime.close()
+  })
+  it('separates stored-page recovery from querying the next unknown-total source page',async()=>{
+    const fixture=queryFixture({mode:'partial',knownTotal:false,count:350,textSize:100});let requests=0,ref=''
+    vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
+      const body=JSON.parse(String(init?.body||'{}'));requests++
+      const call=(id:string,name:string,args:Record<string,unknown>)=>sse([{choices:[{delta:{tool_calls:[{index:0,id,function:{name,arguments:JSON.stringify(args)}}]},finish_reason:'tool_calls'}]}])
+      if(requests===1)return call('first-page','fixture_query',{representation:'detail',limit:100})
+      const result=JSON.parse(body.messages.filter((m:Record<string,unknown>)=>m.role==='tool').at(-1).content)
+      if(requests===2){ref=result.projection.evidenceRef;expect(result.projection.kind).toBe('referenced_collections');expect(result.domainEvidence.range).toEqual({kind:'partial',returned:100,nextRef:'fixture_query:offset:100'});return call('recover','runtime_read_evidence',{evidence_ref:ref,path:['data','rows'],offset:99,limit:1})}
+      if(requests===3){expect(result.sourceRange.kind).toBe('partial');expect(result.sourceRange).not.toHaveProperty('total');expect(result.page.storedTotal).toBe(100);expect(result.page.items).toEqual([fixture.rows[99]]);return call('next-source','fixture_query',{representation:'detail',offset:100,limit:5})}
+      expect(result.data.rows).toEqual(fixture.rows.slice(100,105));expect(result.domainEvidence.range).not.toHaveProperty('total')
+      return sse([{choices:[{delta:{content:'已取回本批明细，其余源数据尚未交付'},finish_reason:'stop'}]}])
+    }))
+    const messages:RuntimeToHost[]=[];const {runtime,agentId}=await createRuntime(messages,{coreOnly:true,domains:[fixture.adapter]})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'取明细，不要汇总',subscription_id:'query-detail'});await waitForEnd(messages,'query-detail')
+    expect(requests,JSON.stringify(messages.filter(m=>m.kind==='event'&&m.event.type==='session.failed'))).toBe(4);expect(fixture.calls).toBe(2);expect(messages.some(m=>m.kind==='event'&&m.event.type==='session.completed')).toBe(true);expect(messages.filter(m=>m.kind==='tool_call')).toHaveLength(0);await runtime.close()
+  })
+  it('does not replace unavailable live observation with an image export in the real loop',async()=>{
+    let requests=0;const calls:string[]=[]
+    vi.stubGlobal('fetch',vi.fn(async()=>sse([{choices:[++requests===1?{delta:{tool_calls:[{index:0,id:'no-ui-write',function:{name:'board_batch',arguments:JSON.stringify({operations:[{op:'add_element',element:{id:'a',kind:'rectangle',text:'A'}}]})}}]},finish_reason:'tool_calls'}:{delta:{content:'保存事实与呈现未知分开说明'},finish_reason:'stop'}]}])))
+    const messages:RuntimeToHost[]=[];const {runtime,agentId}=await createRuntime(messages,{host:(m,r)=>{calls.push(m.name);if(m.name!=='board_observe')return false;r.resolveHostTool({kind:'tool_result',id:m.id,error:'HOST_CAPABILITY_UNAVAILABLE: live canvas DOM is not mounted'});return true}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    const run=runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'保存后检查',subscription_id:'no-ui-observe'});await waitForEnd(messages,'no-ui-observe')
+    expect(calls.filter(name=>name==='board_batch')).toHaveLength(1);expect(calls.filter(name=>name==='board_observe')).toHaveLength(1);expect(calls).not.toContain('board_capture_image');expect(calls).not.toContain('board_export_pptx')
+    expect(runtime.repository.toolCallResult(run.run_id,'no-ui-write')?.status).toBe('succeeded');expect(JSON.stringify(messages.filter(m=>m.kind==='event'&&m.event.type==='agent.message.completed'))).toContain('观察服务不可用')
+    await runtime.close()
+  })
+  it('uses the recovery controller and durable ledger on the real read-tool path',async()=>{
+    let request=0,hostCalls=0
+    vi.stubGlobal('fetch',vi.fn(async()=>sse([{choices:[++request===1?{delta:{tool_calls:[{index:0,id:'read-recover',function:{name:'board_get_state',arguments:'{}'}}]},finish_reason:'tool_calls'}:{delta:{content:'完成'},finish_reason:'stop'}]}])))
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{execution:{contractFor:()=>({origin:'platform',effect:'read',idempotency:'none',statusQuery:false}),classify:()=>({category:'rate_limit',outcome:'not_started',retryAfterMs:20})},host:(m,r)=>{if(m.name!=='board_get_state')return false;r.resolveHostTool({kind:'tool_result',id:m.id,...(++hostCalls===1?{error:'429'}:{result:{ok:true}})});return true}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    const run=runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'读取',subscription_id:'recover-read'})
+    await waitForEnd(messages,'recover-read')
+    expect(hostCalls).toBe(2);expect(runtime.repository.toolCallResult(run.run_id,'read-recover')?.status).toBe('succeeded')
+    expect(runtime.repository.listJournal(thread.thread_id).some(x=>x.event_type==='tool.execution.backoff')).toBe(true)
+    await runtime.close()
+  })
+  it('queries a committed write receipt after timeout instead of replaying it',async()=>{
+    let request=0,writes=0,queries=0
+    vi.stubGlobal('fetch',vi.fn(async()=>sse([{choices:[++request===1?{delta:{tool_calls:[{index:0,id:'receipt-write',function:{name:'board_batch',arguments:JSON.stringify({operations:[{op:'add_element',element:{id:'a',kind:'rectangle',text:'A'}}]})}}]},finish_reason:'tool_calls'}:{delta:{content:'已保存'},finish_reason:'stop'}]}])))
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{toolTimeoutMs:20,execution:{timeBudgetMs:1000,contractFor:()=>({origin:'platform',effect:'write',idempotency:'none',statusQuery:true}),queryStatus:async()=>{queries++;return {state:'succeeded',result:{ok:true,saved:true}}}},host:m=>{if(m.name!=='board_batch')return false;writes++;return true}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    const run=runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'写入',subscription_id:'receipt-write'})
+    await waitForEnd(messages,'receipt-write')
+    expect(writes).toBe(1);expect(queries).toBe(1);expect(runtime.repository.toolCallResult(run.run_id,'receipt-write')?.status).toBe('succeeded')
+    await runtime.close()
+  })
+  it('keeps unknown writes uncertain and audits late responses without replay',async()=>{
+    let request=0,writes=0,late:Extract<RuntimeToHost,{kind:'tool_call'}>|undefined
+    vi.stubGlobal('fetch',vi.fn(async()=>sse([{choices:[++request===1?{delta:{tool_calls:[{index:0,id:'uncertain-write',function:{name:'board_batch',arguments:JSON.stringify({operations:[{op:'add_element',element:{id:'a',kind:'rectangle',text:'A'}}]})}}]},finish_reason:'tool_calls'}:{delta:{content:'结果需要核对'},finish_reason:'stop'}]}])))
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{toolTimeoutMs:20,host:m=>{if(m.name!=='board_batch')return false;writes++;late=m;return true}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    const run=runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'写入',subscription_id:'uncertain-write'})
+    await waitForEnd(messages,'uncertain-write')
+    expect(runtime.repository.toolCallResult(run.run_id,'uncertain-write')?.status).toBe('uncertain')
+    runtime.resolveHostTool({kind:'tool_result',id:late!.id,result:{ok:true}})
+    expect(writes).toBe(1);expect(runtime.repository.toolCallResult(run.run_id,'uncertain-write')?.status).toBe('uncertain')
+    expect(runtime.repository.listJournal(thread.thread_id).some(x=>x.event_type==='tool.late_result')).toBe(true)
+    await runtime.close()
+  })
+
+  it('retains cancellation and uncertain execution across restart, without replaying late writes',async()=>{
+    vi.stubGlobal('fetch',vi.fn(async()=>sse([{choices:[{delta:{tool_calls:[{index:0,id:'cancel-write',function:{name:'board_batch',arguments:JSON.stringify({operations:[{op:'add_element',element:{id:'a',kind:'rectangle',text:'A'}}]})}}]},finish_reason:'tool_calls'}]}])))
+    const messages:RuntimeToHost[]=[];let writes=0,late:Extract<RuntimeToHost,{kind:'tool_call'}>|undefined
+    const {runtime,agentId,root}=await createRuntime(messages,{host:m=>{if(m.name!=='board_batch')return false;writes++;late=m;return true}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1'}}) as {thread_id:string}
+    const run=runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'写入',subscription_id:'cancel-write'})
+    await vi.waitFor(()=>expect(late).toBeDefined());runtime.cancelRun(run.run_id);await waitForEnd(messages,'cancel-write')
+    expect(runtime.repository.toolCallResult(run.run_id,'cancel-write')?.status).toBe('uncertain')
+    runtime.resolveHostTool({kind:'tool_result',id:late!.id,result:{ok:true}})
+    expect(runtime.repository.listJournal(thread.thread_id).some(x=>x.event_type==='tool.late_result')).toBe(true)
+    await runtime.close()
+    const reopened=new RuntimeRepository(root,join(root,'defaults.json'));await reopened.open()
+    expect(reopened.toolCallResult(run.run_id,'cancel-write')?.status).toBe('uncertain')
+    expect(reopened.beginToolCall(run.run_id,'cancel-write')).toBe(false)
+    const lateEvidence=reopened.listJournal(thread.thread_id).find(x=>x.event_type==='tool.late_evidence')
+    expect(lateEvidence?.payload).toMatchObject({replayed:false,evidence_ref:expect.any(String)})
+    const ref=String((lateEvidence?.payload as Record<string,unknown>).evidence_ref)
+    const saved=await new FileEvidenceStore(join(root,'evidence-v1')).get(ref,{applicationId:'host-tools',workspaceId:'p1',runId:run.run_id})
+    expect(saved.payload).toEqual({result:{ok:true},error:null});expect(saved.record.validity).toBe('unknown');expect(saved.record.execution.callId).toBe('cancel-write');expect(saved.record.execution.attemptId).toContain('cancel-write')
+
+    expect(reopened.listJournal(thread.thread_id).some(x=>x.event_type==='tool.execution.before')).toBe(true)
+    const configurationBefore={models:reopened.listModels(),skills:reopened.boundSkills(agentId),mcp:reopened.mcpForAgent(agentId),prompts:reopened.promptSnapshot()}
+    const budgetBefore=reopened.latestCheckpoint(thread.thread_id)?.middlewareState?.runActionBudget
+    expect(budgetBefore).toMatchObject({runId:run.run_id,used:2,byLayer:{context_projection:1,tool_attempt:1}})
+    expect(writes).toBe(1);await reopened.close()
+    // Restart the complete runtime, not just SQLite. Startup must preserve the
+    // uncertain receipt and shared counts without launching any host work.
+    const restartedMessages:RuntimeToHost[]=[]
+    const restarted=new TuGoRuntime(root,join(root,'defaults.json'),m=>restartedMessages.push(m))
+    await restarted.start()
+    expect(restarted.repository.latestCheckpoint(thread.thread_id)?.middlewareState?.runActionBudget).toEqual(budgetBefore)
+    expect(restarted.repository.toolCallResult(run.run_id,'cancel-write')?.status).toBe('uncertain')
+    expect({models:restarted.repository.listModels(),skills:restarted.repository.boundSkills(agentId),mcp:restarted.repository.mcpForAgent(agentId),prompts:restarted.repository.promptSnapshot()}).toEqual(configurationBefore)
+    expect(restartedMessages.filter(m=>m.kind==='tool_call')).toHaveLength(0)
+    expect(restarted.repository.beginToolCall(run.run_id,'cancel-write')).toBe(false)
+    await restarted.close()
+  })
+
+  it('actively observes before delivery and feeds unresolved effects back without replaying writes',async()=>{
+    const bodies:Record<string,unknown>[]=[]
+    vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
+      bodies.push(JSON.parse(String(init?.body||'{}')))
+      if(bodies.length===1)return sse([{choices:[{delta:{tool_calls:[{index:0,id:'only-write',function:{name:'board_batch',arguments:JSON.stringify({operations:[{op:'add_element',element:{id:'a',kind:'rectangle',text:'A'}}]})}}]},finish_reason:'tool_calls'}]}])
+      return sse([{choices:[{delta:{content:'已保存，但仍需调整遮挡。'},finish_reason:'stop'}]}])
+    }))
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{observation:{observation_id:'host-observation',project_id:'p1',renderer_fingerprint:'test-build',verdict:'needs_decision',checks:{geometry:'failed',render:'failed'},blocking_count:1,findings:[{type:'edge_occluded',refs:['edge','block'],message:'线被框遮挡',severity:'blocking'}],summary:'1 项阻断'}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p1',conversation_id:'c1'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'创建方框',subscription_id:'observe-delivery'})
+    await waitForEnd(messages,'observe-delivery')
+    expect(messages.filter(m=>m.kind==='tool_call'&&m.name==='board_batch')).toHaveLength(1)
+    expect(messages.filter(m=>m.kind==='tool_call'&&m.name==='board_observe')).toHaveLength(1)
+    expect(JSON.stringify(bodies.at(-1))).toContain('edge_occluded')
+    expect(messages.filter(m=>m.kind==='event'&&m.event.type==='llm.call.failed'&&m.event.payload.error_category==='observation_feedback')).toHaveLength(2)
+    expect(messages.some(m=>m.kind==='event'&&m.event.type==='agent.message.completed'&&String(m.event.payload.content).includes('needs_decision'))).toBe(true)
+    await runtime.close()
+  })
+
   it('seeds an independent thread with branch history before its first run', async () => {
     const bodies: Record<string, unknown>[] = []
     vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
@@ -330,6 +773,10 @@ describe('TuGoRuntime loop', () => {
     const secondMessages = bodies.at(-1)?.messages as Array<{ role: string; content: unknown }>
     expect(secondMessages.some(item => item.role === 'user' && Array.isArray(item.content) && JSON.stringify(item.content).includes('data:image/png;base64,'))).toBe(true)
     expect(Array.isArray(secondMessages.filter(item => item.role === 'user').at(-1)?.content)).toBe(false)
+    const projections=runtime.repository.listJournal(thread.thread_id).filter(x=>x.event_type==='context.projection')
+    expect(projections).toHaveLength(2)
+    expect(projections[1].payload).toMatchObject({admitted:true,partitions:{mediaOccurrences:1,media:16384}})
+    expect(JSON.stringify(projections)).not.toContain('iVBORw0KGgo')
     await runtime.close()
     const database = (await readFile(join(root, 'runtime.sqlite'))).toString('latin1')
     expect(database).not.toContain('TUGO_TEST_SECRET_SHOULD_NOT_PERSIST_42')
@@ -706,4 +1153,81 @@ describe('TuGoRuntime loop', () => {
     await expect(runtime.http('POST', '/api/runtime/bootstrap', { model_id: model.model_id })).resolves.toHaveProperty('agent')
     await runtime.close()
   })
+
+  it('soft-blocks a stuck tool loop, lets the model correct, and completes the run', async () => {
+    let request = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      request += 1
+      if (request <= 3) return sse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: `call-${request}`, function: { name: 'board_get_state', arguments: '{"project_id":"p1"}' } }] }, finish_reason: 'tool_calls' }] }])
+      return sse([{ choices: [{ delta: { content: '好的，我改用其他方式。' }, finish_reason: 'stop' }] }])
+    }))
+    const messages: RuntimeToHost[] = []; const { runtime, agentId } = await createRuntime(messages, { loopDetection: { warnAfter: 2, stopAfter: 3 } })
+    const thread = await runtime.http('POST', '/api/threads', { assistant_id: agentId, metadata: { project_id: 'p1', conversation_id: 'c1' } }) as { thread_id: string }
+    runtime.startRun({ thread_id: thread.thread_id, agent_id: agentId, content: '用户请求：读取画板', subscription_id: 's-loop-soft' })
+    await waitForEnd(messages, 's-loop-soft')
+    expect(messages.some(item => item.kind === 'event' && item.event.type === 'agent.tool_result' && item.event.payload.is_error === true && String(item.event.payload.content).includes('循环检测拦截'))).toBe(true)
+    expect(messages.some(item => item.kind === 'event' && item.event.type === 'session.completed')).toBe(true)
+    expect(messages.some(item => item.kind === 'event' && item.event.type === 'session.failed')).toBe(false)
+    await runtime.close()
+  })
+
+  it('fails the run only when the model repeats the blocked call immediately', async () => {
+    let request = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      request += 1
+      return sse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: `call-${request}`, function: { name: 'board_get_state', arguments: '{"project_id":"p1"}' } }] }, finish_reason: 'tool_calls' }] }])
+    }))
+    const messages: RuntimeToHost[] = []; const { runtime, agentId } = await createRuntime(messages, { loopDetection: { warnAfter: 2, stopAfter: 3 } })
+    const thread = await runtime.http('POST', '/api/threads', { assistant_id: agentId, metadata: { project_id: 'p1', conversation_id: 'c1' } }) as { thread_id: string }
+    runtime.startRun({ thread_id: thread.thread_id, agent_id: agentId, content: '用户请求：读取画板', subscription_id: 's-loop-fatal' })
+    await waitForEnd(messages, 's-loop-fatal')
+    expect(messages.some(item => item.kind === 'event' && item.event.type === 'session.failed' && String(item.event.payload.error_detail).includes('重复'))).toBe(true)
+    await runtime.close()
+  })
+
+  it('blocks calls beyond the per-tool budget softly and completes when the model wraps up', async () => {
+    let request = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      request += 1
+      if (request <= 2) return sse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: `call-${request}`, function: { name: 'board_get_state', arguments: `{"project_id":"p${request}"}` } }] }, finish_reason: 'tool_calls' }] }])
+      return sse([{ choices: [{ delta: { content: '好的，我基于已有画板状态总结成果。' }, finish_reason: 'stop' }] }])
+    }))
+    const messages: RuntimeToHost[] = []; const { runtime, agentId } = await createRuntime(messages, { loopDetection: { warnAfter: 99, stopAfter: 99, frequencyWarnAfter: 1, frequencyStopAfter: 2 } })
+    const thread = await runtime.http('POST', '/api/threads', { assistant_id: agentId, metadata: { project_id: 'p1', conversation_id: 'c1' } }) as { thread_id: string }
+    runtime.startRun({ thread_id: thread.thread_id, agent_id: agentId, content: '用户请求：读取画板', subscription_id: 's-budget-soft' })
+    await waitForEnd(messages, 's-budget-soft')
+    expect(messages.some(item => item.kind === 'event' && item.event.type === 'agent.tool_result' && item.event.payload.is_error === true && String(item.event.payload.content).includes('调用预算'))).toBe(true)
+    expect(messages.some(item => item.kind === 'event' && item.event.type === 'session.completed')).toBe(true)
+    expect(messages.some(item => item.kind === 'event' && item.event.type === 'session.failed')).toBe(false)
+    await runtime.close()
+  })
+  it('stops before a write when the persisted shared processing budget is exhausted',async()=>{
+    vi.stubGlobal('fetch',vi.fn(async()=>sse([{choices:[{delta:{tool_calls:[{index:0,id:'limited-write',function:{name:'board_batch',arguments:JSON.stringify({operations:[]})}}]},finish_reason:'tool_calls'}]}])))
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{middleware:{maxProcessingActions:1}})
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p',conversation_id:'c'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'test shared budget',subscription_id:'shared-budget'})
+    await waitForEnd(messages,'shared-budget')
+    expect(messages.filter(m=>m.kind==='tool_call'&&m.name==='board_batch')).toHaveLength(0)
+    expect(messages.some(m=>m.kind==='event'&&m.event.type==='session.failed'&&JSON.stringify(m.event.payload).includes('共享运行处理预算耗尽'))).toBe(true)
+    await runtime.close()
+  })
+
+  it('does not classify repeated read-only checks as failed repair attempts',async()=>{
+    let turns=0,observations=0
+    vi.stubGlobal('fetch',vi.fn(async()=>{const first=turns++===0;if(turns>4)return sse([{choices:[{delta:{content:'检查结束，问题未解决'},finish_reason:'stop'}]}]);return sse([{choices:[{delta:{tool_calls:[{index:0,id:'progress-'+turns,function:{name:first?'board_batch':'board_observe',arguments:JSON.stringify(first?{operations:[{op:'add_element',element:{id:'a',kind:'rectangle',text:'A'}}]}:{} )}}]},finish_reason:'tool_calls'}]}])}))
+    const messages:RuntimeToHost[]=[]
+    const {runtime,agentId}=await createRuntime(messages,{observeTool:true,loopDetection:{enabled:false},host:(message,runtime)=>{
+      if(message.name!=='board_observe')return false
+      runtime.resolveHostTool({kind:'tool_result',id:message.id,result:{ok:true,observation:{observation_id:'progress-'+(++observations),verdict:'needs_decision',blocking_count:1,findings:[{severity:'blocking',type:'edge_occluded',refs:['e','n']}]}}});return true
+    }})
+    turns=0 // Exclude model probe/bootstrap requests from the task script.
+    const thread=await runtime.http('POST','/api/threads',{assistant_id:agentId,metadata:{project_id:'p',conversation_id:'c'}}) as {thread_id:string}
+    runtime.startRun({thread_id:thread.thread_id,agent_id:agentId,content:'test no progress',subscription_id:'no-progress'})
+    await waitForEnd(messages,'no-progress')
+    expect(observations).toBeGreaterThanOrEqual(3);expect(messages.filter(m=>m.kind==='tool_call'&&m.name==='board_batch')).toHaveLength(1)
+    expect(messages.some(m=>m.kind==='event'&&(m.event.type==='session.failed'||m.event.type==='run.quality_stalled'))).toBe(false)
+    await runtime.close()
+  })
+
 })

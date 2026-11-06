@@ -1,5 +1,7 @@
 import type { BoardDocument, BoardEdge, BoardElement, BoardOperation } from '../types'
 import { alignOperations, distributeOperations } from './boardCommands'
+import { normalizeViewport } from './viewport'
+import { normalizePresentationAreas } from './presentationAreas'
 
 export type BoardHistory = { current: BoardDocument; past: BoardDocument[]; future: BoardDocument[] }
 
@@ -61,13 +63,13 @@ const normalizeEdge = (value: BoardEdge, index = 0): BoardEdge => {
   ...value, id: String(value.id || `recovered_edge_${index}`), from: String(value.from || raw.source || ''), to: String(value.to || raw.target || ''),
   controlPoints: finiteControlPoints(value.controlPoints), freeStart: finitePoint(value.freeStart), freeEnd: finitePoint(value.freeEnd), fromAnchor: finiteAnchor(value.fromAnchor), toAnchor: finiteAnchor(value.toAnchor), stroke: value.stroke || style.stroke || '#64748B', strokeWidth: Number(value.strokeWidth || style.strokeWidth || 2),
   strokeStyle: value.strokeStyle || (value.dashed ? 'dashed' : 'solid'), startArrow: value.startArrow || (value.arrowStart ? 'arrow' : 'none'),
-  endArrow: value.endArrow || style.endArrow || (value.arrowEnd ? 'arrow' : 'none'), routing: value.routing || style.routing || 'curve', opacity: value.opacity ?? style.opacity ?? 1, zIndex: value.zIndex ?? index,
+  endArrow: value.endArrow || style.endArrow || (value.arrowEnd ? 'arrow' : 'none'), routing: value.routing || style.routing || 'elbow', opacity: value.opacity ?? style.opacity ?? 1, zIndex: value.zIndex ?? index,
 }}
 export const normalizeDocument = (value: BoardDocument): BoardDocument => {
   const elements = (Array.isArray(value.elements) ? value.elements : []).map(normalizeElement)
   const ids = new Set(elements.map(item => item.id))
   const edges = (Array.isArray(value.edges) ? value.edges : []).map(normalizeEdge).filter(edge => (ids.has(edge.from) || edge.freeStart) && (ids.has(edge.to) || edge.freeEnd))
-  return { ...value, version: 3, paletteId: value.paletteId || 'macaron', elements, edges }
+  return { ...value, version: 3, paletteId: value.paletteId || 'macaron', elements, edges, ...(value.presentationAreas !== undefined ? { presentationAreas: normalizePresentationAreas(value.presentationAreas) } : {}), viewport: normalizeViewport(value.viewport) }
 }
 
 export function applyBoardOperations(document: BoardDocument, operations: BoardOperation[]): BoardDocument {
@@ -134,7 +136,7 @@ export function undo(history: BoardHistory): BoardHistory {
   const previous = history.past.at(-1)
   if (!previous) return history
   return {
-    current: clone(previous),
+    current: { ...clone(previous), viewport: clone(history.current.viewport) },
     past: history.past.slice(0, -1),
     future: [clone(history.current), ...history.future].slice(0, 100),
   }
@@ -144,7 +146,7 @@ export function redo(history: BoardHistory): BoardHistory {
   const following = history.future[0]
   if (!following) return history
   return {
-    current: clone(following),
+    current: { ...clone(following), viewport: clone(history.current.viewport) },
     past: [...history.past, clone(history.current)].slice(-100),
     future: history.future.slice(1),
   }

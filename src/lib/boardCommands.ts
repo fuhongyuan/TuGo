@@ -6,9 +6,59 @@ export type DistributeMode = 'horizontal' | 'vertical'
 
 export const selectedElements = (document: BoardDocument, ids: string[]) => document.elements.filter(item => ids.includes(item.id))
 
+/** Test visual corners in the container's local coordinate system. */
+export function containsElement(container: BoardElement, child: BoardElement) {
+  const angle = -(container.rotation || 0) * Math.PI / 180
+  const childAngle = (child.rotation || 0) * Math.PI / 180
+  return [-1, 1].every(sx => [-1, 1].every(sy => {
+    const dx = sx * child.width / 2, dy = sy * child.height / 2
+    const x = child.x + child.width / 2 + dx * Math.cos(childAngle) - dy * Math.sin(childAngle) - container.x - container.width / 2
+    const y = child.y + child.height / 2 + dx * Math.sin(childAngle) + dy * Math.cos(childAngle) - container.y - container.height / 2
+    return Math.abs(x * Math.cos(angle) - y * Math.sin(angle)) <= container.width / 2 + .001 && Math.abs(x * Math.sin(angle) + y * Math.cos(angle)) <= container.height / 2 + .001
+  }))
+}
+
+// Shared with rendering: selection must follow visible stacking, not stale zIndex.
+export function elementLayers(elements: BoardElement[]) {
+  const background = elements.filter(item => item.kind === 'frame' || Boolean(item.metadata?.container) || (item.kind !== 'text' && elements.some(other => other.id !== item.id && item.width * item.height > other.width * other.height && containsElement(item, other))))
+    .sort((a, b) => b.width * b.height - a.width * a.height || (a.zIndex ?? 0) - (b.zIndex ?? 0))
+  const ids = new Set(background.map(item => item.id))
+  const foreground = elements.filter(item => !ids.has(item.id)).sort((a, b) => Number(a.kind === 'text') - Number(b.kind === 'text') || (a.zIndex ?? 0) - (b.zIndex ?? 0))
+  return { background, foreground }
+}
+
+export function dragSelection(document: BoardDocument, ids: string[]) {
+  const { background, foreground } = elementLayers(document.elements)
+  const ordered = [...background, ...foreground]
+  const selected = new Set(ids)
+  // Resolve once at pointer-down; never scoop up new objects while moving.
+  for (let index = 0; index < ordered.length; index++) {
+    const parent = ordered[index]
+    if (!selected.has(parent.id) || parent.locked || parent.kind === 'text') continue
+    for (const child of ordered.slice(index + 1)) if (!child.locked && containsElement(parent, child)) selected.add(child.id)
+  }
+  for (const edge of document.edges) {
+    const moves = (id: string) => selected.has(id) && document.elements.some(element => element.id === id && !element.locked)
+    const anchorsMove = (!edge.from || moves(edge.from)) && (!edge.to || moves(edge.to))
+    const freePoints = [!edge.from ? edge.freeStart : undefined, !edge.to ? edge.freeEnd : undefined, ...(edge.controlPoints || [])].filter(point => point !== undefined)
+    if (!anchorsMove || (!edge.from && !edge.freeStart) || (!edge.to && !edge.freeEnd)) continue
+    if (background.some(parent => selected.has(parent.id) && !parent.locked && freePoints.every(point => containsElement(parent, { ...parent, x: point.x, y: point.y, width: 0, height: 0, rotation: 0 })))) selected.add(edge.id)
+  }
+  return [...selected]
+}
+
 export function selectionForElement(document: BoardDocument, id: string, current: string[], additive = false) {
   const element = document.elements.find(item => item.id === id)
-  const related = element?.groupId ? document.elements.filter(item => item.groupId === element.groupId).map(item => item.id) : [id]
+  let related = element?.groupId ? document.elements.filter(item => item.groupId === element.groupId).map(item => item.id) : [id]
+  if (element?.kind === 'frame') {
+    const descendants = new Set([id])
+    for (let pass = 0; pass < document.elements.length; pass++) {
+      const before = descendants.size
+      for (const item of document.elements) if (item.groupId && descendants.has(item.groupId)) descendants.add(item.id)
+      if (descendants.size === before) break
+    }
+    related = [...descendants]
+  }
   if (!additive) return related
   const hasAll = related.every(item => current.includes(item))
   return hasAll ? current.filter(item => !related.includes(item)) : [...new Set([...current, ...related])]

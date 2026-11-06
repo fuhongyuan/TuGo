@@ -15,6 +15,7 @@ const asarCli = join(root, 'node_modules', '.bin', process.platform === 'win32' 
 const listed = spawnSync(asarCli, ['list', asarPath], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
 if (listed.status !== 0) throw new Error(`Unable to inspect app.asar: ${listed.stderr || `exit ${listed.status}`}`)
 const entries = listed.stdout.split(/\r?\n/).filter(Boolean)
+for(const required of ['/runtime-ts/dist/runtime.js','/runtime-ts/dist/agentLoop.js','/runtime-ts/dist/tugo/runtimeApplication.js'])if(!entries.includes(required))throw new Error(`Release package missing runtime dependency: ${required}`)
 
 const forbidden = [
   { label: 'Python bytecode/source', pattern: /(?:^|\/)(?:[^/]+\.py[co]?|__pycache__)(?:$|\/)/i },

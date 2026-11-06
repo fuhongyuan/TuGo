@@ -192,7 +192,7 @@ export const reduceRunPresentation = (previous: ChatRunStatus | undefined, event
   if (type === 'plan.abandoned') return { ...next, headline: '正在调整执行方式', activity: { id: 'plan:abandoned', label: '原执行计划已结束', status: 'completed', category: 'planning' } }
   if (type === 'plan.snapshot' || type === 'plan.updated') return next
   if (type === 'context.summarization.started') return { ...next, phase: 'analyzing', headline: '正在整理对话上下文', activity: { id: 'context:summary', label: '压缩较早的对话内容，保留任务目标和未完成事项', status: 'running', category: 'preparing' } }
-  if (type === 'context.summarization.completed') return { ...next, headline: '正在继续当前任务', activity: { id: 'context:summary', label: '已整理对话上下文', status: 'completed', category: 'preparing' } }
+  if (type === 'context.summarization.completed') return payload.applied===false ? { ...next, headline: '上下文整理未完成', activity: { id: 'context:summary', label: '保留原始记录，未应用压缩', status: 'failed', category: 'preparing' } } : { ...next, headline: '正在继续当前任务', activity: { id: 'context:summary', label: '已整理对话上下文', status: 'completed', category: 'preparing' } }
   if (type === 'context.summarization.degraded') return { ...next, headline: '正在继续当前任务', activity: { id: 'context:summary', label: '已使用本地摘要继续任务', status: 'completed', category: 'preparing' } }
   if (type === 'llm.call.failed') {
     const recoverable = payload.recoverable === true
@@ -212,7 +212,7 @@ export const reduceRunPresentation = (previous: ChatRunStatus | undefined, event
       : undefined
     const measuredDuration = Number(payload.duration_ms || 0)
     const fallbackDuration = Math.max(0, new Date(at).getTime() - new Date(next.startedAt).getTime())
-    return { ...next, phase: 'finalizing', headline: '任务已完成', usage: measuredUsage, durationMs: measuredDuration || fallbackDuration, activity: next.activity ? { ...next.activity, status: next.activity.status === 'failed' ? 'failed' : 'completed' } : undefined }
+    return { ...next, phase: 'finalizing', headline: payload.status==='partial'?'本轮已结束，仍有问题待处理':'任务已完成', usage: measuredUsage, durationMs: measuredDuration || fallbackDuration, activity: payload.status==='partial'?{id:'quality:partial',label:'修改已保存，质量尚未通过',status:'completed',category:'preparing'}:next.activity ? { ...next.activity, status: next.activity.status === 'failed' ? 'failed' : 'completed' } : undefined }
   }
   if (type === 'session.failed') return { ...next, phase: 'waiting', headline: '任务未完成', activity: next.activity ? { ...next.activity, status: 'failed' } : { id: 'run:failed', label: text(payload.user_action || payload.message) || '运行过程中遇到错误', status: 'failed', category: 'working' } }
   if (type === 'session.interrupted') return { ...next, phase: 'waiting', headline: '任务已停止', activity: { id: 'run:interrupted', label: '已停止本次操作', status: 'completed', category: 'working' } }

@@ -7,6 +7,15 @@ const node = (id: string, x: number, y: number): BoardElement => ({ id, kind: 'r
 const base: BoardDocument = { version: 3, viewport: { x: 0, y: 0, zoom: 1 }, elements: [node('a', 0, 0), node('b', 220, 150), node('c', 0, 150), node('d', 220, 0)], edges: [{ id: 'one', from: 'a', to: 'b', stroke: '#000', strokeWidth: 2, routing: 'straight' }, { id: 'two', from: 'c', to: 'd', stroke: '#000', strokeWidth: 2, routing: 'straight' }] }
 
 describe('diagram reflection and layout optimization', () => {
+  it('does not lower quality merely because an independent panel is duplicated', () => {
+    const elements = [node('a', 0, 0), node('b', 400, 0), node('block', 190, 0)].map(item => ({...item, groupId:'panel-one'}))
+    const edge = {id:'ab',from:'a',to:'b',stroke:'#000',strokeWidth:2,routing:'straight' as const}
+    const one = reflectDiagram({...base,elements,edges:[edge]})
+    const duplicate = elements.map(item=>({...item,id:`copy-${item.id}`,x:item.x+1000,groupId:'panel-two'}))
+    const two = reflectDiagram({...base,elements:[...elements,...duplicate],edges:[edge,{...edge,id:'copy-ab',from:'copy-a',to:'copy-b'}]})
+    expect(two.dimensions).toEqual(one.dimensions)
+    expect(two.issues.some(item=>item.type==='edge_over_node'&&item.severity==='high')).toBe(true)
+  })
   it('skips reflection for unconnected sketch nodes', () => expect(reflectDiagram({ ...base, edges: [] })).toMatchObject({ checked: false, score: 100 }))
   it('reports crossing edges with an actionable layout recommendation', () => {
     const reflection = reflectDiagram(base)
@@ -18,13 +27,27 @@ describe('diagram reflection and layout optimization', () => {
     expect(optimized.edges.every(edge => edge.routing === 'elbow')).toBe(true)
     expect(optimized.elements.map(item => item.x)).not.toEqual(base.elements.map(item => item.x))
   })
+  it('fits verbose cards before creating label clearance between columns', () => {
+    const document: BoardDocument = {
+      ...base,
+      elements: [
+        { ...node('left', 0, 0), width: 120, height: 42, text: '这是一个需要更多横向空间的源节点说明' },
+        { ...node('right', 220, 0), width: 120, height: 42, text: '这是一个需要更多横向空间的目标节点说明' },
+      ],
+      edges: [{ id: 'edge', from: 'left', to: 'right', label: '解构与外化', stroke: '#000', strokeWidth: 2 }],
+    }
+    const optimized = applyBoardOperations(document, optimizeDiagramLayout(document))
+    const left = optimized.elements.find(item => item.id === 'left')!, right = optimized.elements.find(item => item.id === 'right')!
+    expect(left.width).toBeGreaterThan(120)
+    expect(right.x - (left.x + left.width)).toBeGreaterThanOrEqual(108)
+  })
   it('uses local repair by default at the tool boundary without globally moving cards', () => {
     const document: BoardDocument = { ...base, elements: [{ ...node('a', 0, 0), text: '一段很长很长很长很长很长的文字', height: 24 }, node('b', 220, 150)] }
     const optimized = applyBoardOperations(document, optimizeDiagramLayout(document, 'local'))
     expect(optimized.elements.find(item => item.id === 'a')?.height).toBeGreaterThan(24)
     expect(optimized.elements.find(item => item.id === 'b')?.x).toBe(220)
   })
-  it('detects a connector crossing another card and lowers an enclosing container', () => {
+  it('detects a connector crossing another card without falsely blaming background paint order', () => {
     const document: BoardDocument = {
       ...base,
       elements: [
@@ -35,7 +58,7 @@ describe('diagram reflection and layout optimization', () => {
     }
     const reflection = reflectDiagram(document)
     expect(reflection.issues.some(issue => issue.type === 'edge_over_node')).toBe(true)
-    expect(reflection.issues.some(issue => issue.type === 'background_occlusion')).toBe(true)
+    expect(reflection.issues.some(issue => issue.type === 'background_occlusion')).toBe(false)
     const optimized = applyBoardOperations(document, optimizeDiagramLayout(document))
     expect(optimized.elements.find(item => item.id === 'container')?.zIndex).toBeLessThan(0)
   })
@@ -59,7 +82,7 @@ describe('diagram reflection and layout optimization', () => {
     const document: BoardDocument = {
       ...base,
       elements: [
-        { ...node('a', 0, 0), height: 30, text: '这是一个明显超过卡片宽度且会被裁切的长标题', fontSize: 10, fill: '#263145', textColor: '#334155' },
+        { ...node('a', 0, 0), height: 30, text: '这是一个明显超过卡片宽度且会被裁切的长标题，即使自动调整字号也不能将全部内容放进这个小框', fontSize: 10, fill: '#263145', textColor: '#334155' },
         node('b', 260, 0), node('c', 260, 160),
       ],
       edges: [{ id: 'edge', from: 'a', to: 'b', label: '关系', stroke: '#000', strokeWidth: 2 }],

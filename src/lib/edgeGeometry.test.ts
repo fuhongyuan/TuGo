@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { BoardElement } from '../types'
-import { edgeAttachmentForPoint, edgeAttachmentPoint, resolvedEdgeAnchor } from './edgeGeometry'
+import { edgeAttachmentForPoint, edgeAttachmentPoint, edgeAttachmentTargetAt, resolvedEdgeAnchor } from './edgeGeometry'
 
 const box: BoardElement = {
   id: 'box', kind: 'rectangle', x: 100, y: 200, width: 160, height: 80, text: '',
@@ -17,5 +17,13 @@ describe('edge attachment geometry', () => {
     const attachment = { x: 1, y: .25 }
     expect(edgeAttachmentPoint(box, attachment)).toEqual({ x: 260, y: 220 })
     expect(resolvedEdgeAnchor(box, { x: -1000, y: 1000 }, attachment)).toEqual({ x: 260, y: 220 })
+  })
+
+  it('does not reattach a dragged endpoint to its original card or a background frame', () => {
+    const frame: BoardElement = { ...box, id: 'frame', kind: 'frame', x: 0, y: 0, width: 800, height: 600, zIndex: 0 }
+    const original: BoardElement = { ...box, id: 'original', zIndex: 2 }
+    const next: BoardElement = { ...box, id: 'next', x: 320, y: 200, zIndex: 3 }
+    expect(edgeAttachmentTargetAt([frame, original, next], { x: 160, y: 240 }, ['original'])).toBeUndefined()
+    expect(edgeAttachmentTargetAt([frame, original, next], { x: 360, y: 240 }, ['original'])).toMatchObject({ id: 'next' })
   })
 })

@@ -9,6 +9,8 @@ dev-shell/
 vite.config.js
 vite.config.d.ts
 local-backend.log
+.tugo-package-venv/
+artifacts/
 .zcode/
 release/
 release-rc/

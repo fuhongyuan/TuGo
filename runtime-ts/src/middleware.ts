@@ -96,7 +96,7 @@ export class PlanMiddleware implements RuntimeMiddleware {
     if (!context.calls.length && attempts < 2 && (needsCreation || hasOpenPlan)) {
       context.calls.length = 0
       context.text = ''
-      context.checkpoint.messages.push({ role: 'system', content: this.prompt(needsCreation ? 'middleware.plan_reminder_create' : 'middleware.plan_reminder_continue') })
+      context.checkpoint.messages.push({ role: 'system', providerMetadata:{runtimeTransientMessage:true}, content: this.prompt(needsCreation ? 'middleware.plan_reminder_create' : 'middleware.plan_reminder_continue') })
       context.checkpoint.middlewareState = { ...state, planReminders: attempts + 1, repeatModel: true }
     } else {
       if (!context.calls.length && attempts >= 2 && hasOpenPlan && context.checkpoint.plan) {
@@ -106,6 +106,25 @@ export class PlanMiddleware implements RuntimeMiddleware {
       context.checkpoint.middlewareState = { ...state, planReminders: 0, repeatModel: false }
     }
   }
+}
+
+// A repeat only counts while it is unbroken: the same call separated by any
+// other tool call is a normal re-check after progress (run tests → edit → run
+// tests again). Only back-to-back identical attempts are treated as a stuck
+// loop, and the first block is corrective — the run fails only when the model
+// immediately repeats the blocked call.
+// The per-tool frequency budget is the other soft limit: drawing funnels
+// through a handful of board tools, so hitting the budget means "stop using
+// this tool and wrap up", never "abort the run". maxLoops/maxToolCalls/
+// maxRunMs remain the hard caps.
+export class LoopBlockError extends Error {
+  constructor(message: string, readonly fatal: boolean) { super(message); this.name = 'LoopBlockError' }
+}
+
+const prune = (value: JsonObject, recent: Set<string>) => {
+  const record: Record<string, number> = {}
+  for (const [key, count] of Object.entries(value)) if (recent.has(key)) record[key] = Number(count)
+  return record
 }
 
 export class LoopDetectionMiddleware implements RuntimeMiddleware {
@@ -118,18 +137,32 @@ export class LoopDetectionMiddleware implements RuntimeMiddleware {
       checkpoint.middlewareState = { ...state, deferredToolWarnings: [...pending, content] }
     }
     const signature = `${call.name}:${JSON.stringify(call.arguments)}`
-    const repeats = checkpoint.loopSignatures.filter(item => item === signature).length + 1
+    const previous = checkpoint.loopSignatures.at(-1)
     checkpoint.loopSignatures.push(signature)
     checkpoint.loopSignatures = checkpoint.loopSignatures.slice(-20)
-    if (repeats >= this.stopAfter) throw new Error(`检测到无进展的重复工具调用：${call.name}`)
+    const recent = new Set(checkpoint.loopSignatures)
+    const state = object(checkpoint.middlewareState)
+    const streaks = prune(object(state.loopStreaks), recent)
+    const blocks = prune(object(state.loopBlocks), recent)
+    const streak = previous === signature ? Number(streaks[signature] || 0) + 1 : 1
+    streaks[signature] = streak
+    if (previous !== signature) delete blocks[signature]
+    if (streak >= this.stopAfter) {
+      const blocked = Number(blocks[signature] || 0) + 1
+      blocks[signature] = blocked
+      checkpoint.middlewareState = { ...state, loopStreaks: streaks, loopBlocks: blocks }
+      if (blocked > 1) throw new LoopBlockError(`检测到无进展的重复工具调用：${call.name}`, true)
+      throw new LoopBlockError(`循环检测拦截了本次调用：${call.name} 已连续 ${streak} 次以相同参数调用且无进展，请更换参数或改用其他方式`, false)
+    }
+    checkpoint.middlewareState = { ...state, loopStreaks: streaks, loopBlocks: blocks }
     // Do not insert a system message here. OpenAI-compatible providers require
     // every tool result to be immediately adjacent to the assistant tool-call
     // message; a warning inserted between them corrupts the conversation.
-    if (repeats >= this.warnAfter) deferWarning(this.prompt('middleware.loop_warning', { tool_name: call.name }))
+    if (streak >= this.warnAfter) deferWarning(this.prompt('middleware.loop_warning', { tool_name: call.name }))
     checkpoint.toolFrequencies ||= {}
     const frequency = Number(checkpoint.toolFrequencies[call.name] || 0) + 1
     checkpoint.toolFrequencies[call.name] = frequency
-    if (frequency >= this.frequencyStopAfter) throw new Error(`工具 ${call.name} 在本次运行中调用过于频繁（${frequency} 次）`)
+    if (frequency >= this.frequencyStopAfter) throw new LoopBlockError(`工具 ${call.name} 在本次运行中已调用 ${frequency} 次，达到调用预算。请基于当前画板状态与已有结果收尾：总结成果或明确说明阻塞原因，不要再调用该工具`, false)
     if (frequency === this.frequencyWarnAfter) deferWarning(this.prompt('middleware.loop_frequency_warning', { tool_name: call.name, count: frequency }))
   }
 }
@@ -140,6 +173,6 @@ export const buildMiddlewarePipeline = (configValue: unknown, report: Middleware
   const planMode = plan.enabled === false ? 'disabled' : ['optional', 'required'].includes(String(plan.mode)) ? String(plan.mode) as 'optional' | 'required' : 'optional'
   const loop = object(config.loopDetection)
   const middlewares: RuntimeMiddleware[] = [new SkillCatalogMiddleware(prompt), new PlanMiddleware(planMode, prompt)]
-  if (loop.enabled !== false) middlewares.push(new LoopDetectionMiddleware(Number(loop.warnAfter || 2), Number(loop.stopAfter || 4), Number(loop.frequencyWarnAfter || 20), Number(loop.frequencyStopAfter || 30), prompt))
+  if (loop.enabled !== false) middlewares.push(new LoopDetectionMiddleware(Number(loop.warnAfter || 2), Number(loop.stopAfter || 4), Number(loop.frequencyWarnAfter || 60), Number(loop.frequencyStopAfter || 200), prompt))
   return { pipeline: new MiddlewarePipeline(middlewares, report), planMode }
 }

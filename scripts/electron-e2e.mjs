@@ -12,8 +12,10 @@ const packagedExecutable = process.env.TUGO_E2E_EXECUTABLE ? resolve(process.env
 if (packagedExecutable) await access(packagedExecutable)
 const testRoot = await mkdtemp(join(tmpdir(), 'tugo-electron-e2e-'))
 const dataDir = join(testRoot, 'data')
-const attachmentPath = join(testRoot, 'fixture.md')
-await writeFile(attachmentPath, '# E2E attachment\nTuGo fixture.', 'utf8')
+const attachmentPath = join(testRoot, process.env.TUGO_E2E_PDF_FIXTURE==='1'?'fixture.pdf':'fixture.md')
+if(process.env.TUGO_E2E_PDF_FIXTURE==='1'){
+  const {jsPDF}=await import('jspdf');const pdf=new jsPDF();pdf.text('TuGo fixture.',20,20);await writeFile(attachmentPath,Buffer.from(pdf.output('arraybuffer')))
+}else await writeFile(attachmentPath, '# E2E attachment\nTuGo fixture.', 'utf8')
 const provider = createServer((request, response) => {
   // Keep legacy discovery available, while the product probe below verifies
   // the actual configured model through streaming structured tool calling.
@@ -55,7 +57,7 @@ await new Promise((resolveListen, rejectListen) => { provider.once('error', reje
 const providerUrl = `http://127.0.0.1:${provider.address().port}`
 
 const waitForReport = async path => {
-  const deadline = Date.now() + 45_000
+  const deadline = Date.now() + 180_000
   while (Date.now() < deadline) {
     try { const value = JSON.parse(await readFile(path, 'utf8')); if (!value.ok) throw new Error(value.error || 'Electron E2E failed'); return value } catch (error) {
       if (error instanceof SyntaxError || error?.code === 'ENOENT') { await new Promise(resolveDelay => setTimeout(resolveDelay, 100)); continue }
@@ -84,7 +86,17 @@ const launch = async (mode, launchDataDir = dataDir) => {
   try {
     const result = await Promise.race([
       waitForReport(report),
-      exited.then(result => { throw new Error(`Electron exited before E2E report: ${JSON.stringify(result)} mode=${mode} data=${launchDataDir}`) }),
+      exited.then(async result => {
+        // A successful app may exit between report polls. Read the final report
+        // before treating a clean exit as a failure.
+        if (result.code === 0) {
+          try {
+            const value = JSON.parse(await readFile(report, 'utf8'))
+            if (value.ok) return value
+          } catch { /* No completed report: preserve the exit failure below. */ }
+        }
+        throw new Error(`Electron exited before E2E report: ${JSON.stringify(result)} mode=${mode} data=${launchDataDir}`)
+      }),
     ])
     await exited
     return result

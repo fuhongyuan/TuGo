@@ -19,8 +19,45 @@ const document: BoardDocument = {
   ],
 }
 
+it('includes escaped edge labels in SVG and raster/PDF source', () => {
+  const svg = renderRegionSvg({ ...document, edges: [{ ...document.edges[0], label: '已改连线 <OK>' }] }, { x: 0, y: 0, width: 300, height: 200 })
+  expect(svg).toContain('已改连线 &lt;OK&gt;')
+  expect(svg).toContain('paint-order="stroke"')
+})
+
 describe('single-page region export', () => {
+  it.each(['frame', 'rectangle'] as const)('keeps connectors above an opaque %s and labels above cards', async kind => {
+    const background = { ...node('background', 0, 0), kind, width: 600, height: 300, fill: '#EEDDCC', zIndex: 999 }
+    const a = { ...node('a', 50, 80), fill: '#AAFFAA' }, b = node('b', 400, 80)
+    const output = await buildRegionPptx({ ...document, elements: [a, b, background], edges: [{ id: 'ab', from: 'a', to: 'b', routing: 'straight', stroke: '#123456', strokeWidth: 2, endArrow: 'arrow', label: 'Visible connection' }] }, { x: 0, y: 0, width: 600, height: 300 }, 'Layer regression').write({ outputType: 'uint8array' })
+    const zip = await JSZip.loadAsync(output as Uint8Array)
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string')
+    const shapes = Array.from(new DOMParser().parseFromString(xml, 'application/xml').getElementsByTagName('p:spTree')[0].children)
+    const index = (value: string) => shapes.findIndex(shape => shape.outerHTML.includes(value))
+    expect(index('EEDDCC')).toBeGreaterThanOrEqual(0)
+    expect(index('123456')).toBeGreaterThan(index('EEDDCC'))
+    expect(index('AAFFAA')).toBeGreaterThan(index('123456'))
+    expect(index('Visible connection')).toBeGreaterThan(index('AAFFAA'))
+    expect(xml).toContain('type="arrow"')
+  })
   const region = { x: 20, y: 20, width: 190, height: 120 }
+
+  it.each(['solid', 'dashed', 'dotted'] as const)('isolates text paint from %s shape borders and fill opacity', (strokeStyle) => {
+    const styled = { ...node('styled', 30, 30, '清晰文字\nSecond line'), stroke: '#ff0000', strokeWidth: 12, strokeStyle, fillOpacity: 0, opacity: .6, textColor: '#17243b' }
+    const svg = renderRegionSvg({ ...document, elements: [styled], edges: [] }, region)
+    const parsed = new DOMParser().parseFromString(svg, 'image/svg+xml')
+    const text = parsed.querySelector('text')!
+    expect(text.getAttribute('stroke')).toBe('none')
+    expect(text.getAttribute('stroke-width')).toBe('0')
+    expect(text.getAttribute('stroke-dasharray')).toBe('none')
+    expect(text.getAttribute('fill-opacity')).toBe('1')
+    expect(text.getAttribute('fill')).toBe('#17243b')
+    expect(text.querySelectorAll('tspan').length).toBeGreaterThanOrEqual(2)
+    expect(Array.from(text.querySelectorAll('tspan')).map(line => line.textContent).join('').replace(/\s/g, '')).toBe('清晰文字Secondline')
+    expect(text.parentElement!.getAttribute('stroke')).toBe('#ff0000')
+    expect(text.parentElement!.getAttribute('fill-opacity')).toBe('0')
+    expect(text.parentElement!.getAttribute('opacity')).toBe('0.6')
+  })
 
   it('keeps intersecting elements and only internal edges', () => {
     const clipped = documentForRegion(document, region)
@@ -43,6 +80,11 @@ describe('single-page region export', () => {
     expect(svg).toContain('viewBox="0 0 190 120"')
     expect(svg).toContain('A &amp; B')
     expect(svg).not.toContain('outside')
+  })
+
+  it('renders legacy arrowEnd edges with an SVG arrow marker', () => {
+    const svg = renderRegionSvg({ ...document, edges: [{ ...document.edges[0], arrowEnd: true }] }, region)
+    expect(svg).toContain('marker-end="url(#arrow)"')
   })
 
   it('creates editable draw.io vertices and edges in region coordinates', () => {
@@ -87,7 +129,7 @@ describe('single-page region export', () => {
     const zip = await JSZip.loadAsync(output instanceof Uint8Array ? output : new Uint8Array(output as ArrayBuffer))
     const slideXml = await zip.file('ppt/slides/slide1.xml')?.async('string') || ''
     // One polyline makes two native line segments; the mixed edge adds one.
-    expect((slideXml.match(/<a:prstGeom prst="line(?:Inv)?"/g) || []).length).toBeGreaterThanOrEqual(3)
+    expect((slideXml.match(/<a:prstGeom prst="line(?:Inv)?"/g) || []).length).toBe(3)
   })
 
   it('scales editable text with the fitted board and keeps it above late card geometry', async () => {

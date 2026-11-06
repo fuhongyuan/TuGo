@@ -31,7 +31,7 @@ export class TuGoRunError extends Error {
   }
 }
 
-export type ModelRecord = { model_id: string; name: string; provider_id: string; model: string; display_name: string; is_default?: boolean; enabled?: boolean; extra_config?: { base_url?: string; context_window?: number; max_output_tokens?: number; vision_capable?: boolean; probe_status?: string; [key: string]: unknown }; has_secrets?: boolean }
+export type ModelRecord = { model_id: string; name: string; provider_id: string; model: string; display_name: string; is_default?: boolean; enabled?: boolean; extra_config?: { base_url?: string; context_window?: number; max_output_tokens?: number; vision_capable?: boolean | null; probe_status?: string; [key: string]: unknown }; has_secrets?: boolean }
 export type AgentRecord = {
   agent_id: string; name: string; display_name: string; description?: string; model_id?: string; tool_groups?: string[]; tool_names?: string[]; skills?: string[]; soul?: string
   mcp_connection_ids?: string[]
@@ -85,8 +85,8 @@ export class TuGoApi {
     const extra_config: Record<string, string | number | boolean> = {
       context_window: Number(input.contextWindow || 128000),
       max_output_tokens: Number(input.maxOutputTokens || 32768),
-      vision_capable: input.visionCapable !== false,
     }
+    if (input.visionCapable !== undefined) extra_config.vision_capable = input.visionCapable
     if (input.apiKey) extra_config.api_key = input.apiKey
     if (input.baseUrl) extra_config.base_url = input.baseUrl
     if (input.apiPath) extra_config.api_path = input.apiPath
@@ -254,7 +254,7 @@ export class TuGoApi {
         error ? reject(error) : resolve(accumulated)
       }
       const removeEvent = runtime.onEvent(({ subscriptionId: incoming, event }) => {
-        if (incoming !== subscriptionId) return
+        if (settled || incoming !== subscriptionId) return
         onActivity?.()
         const type = String(event.type || '').toLowerCase()
         const payload = (event.payload || {}) as Record<string, unknown>
@@ -302,7 +302,11 @@ export class TuGoApi {
       }
       signal.addEventListener('abort', abort, { once: true })
       runtime.request<{ run_id: string }>('run.start', { thread_id: threadId, agent_id: agentId, content, subscription_id: subscriptionId, attachment_ids: attachments.map(item => item.attachmentId), prompt_locale: promptLanguageFor(effectiveLanguage(this.config.language)), ...(modelId ? { model_id: modelId } : {}) })
-        .then(result => { runId = result.run_id; onRunId?.(runId); if (signal.aborted) abort() })
+        .then(result => {
+          runId = result.run_id
+          if(signal.aborted){void Promise.resolve(runtime.request('run.cancel',{run_id:runId})).catch(()=>undefined);return}
+          if(!settled)onRunId?.(runId)
+        })
         .catch(error => finish(error instanceof Error ? error : new Error(String(error))))
     })
   }

@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { convertRouteControlPoints, defaultCurveControl, orthogonalControlPoints, placeEdgeLabel, remapControlPoints, sampledEdgePoints } from './canvasGeometry'
+import { convertRouteControlPoints, defaultCurveControl, edgeLabelLines, edgeLabelSize, orthogonalControlPoints, placeEdgeLabel, remapControlPoints, sampledEdgePoints } from './canvasGeometry'
 
 describe('canvas geometry', () => {
+  it('allocates full-width pills for CJK edge labels', () => {
+    expect(edgeLabelSize('解构与外化').width).toBeGreaterThanOrEqual(80)
+    expect(edgeLabelSize('HTTPS').width).toBeLessThan(edgeLabelSize('解构与外化').width)
+  })
+
+  it('preserves edge-label line breaks for canvas and export renderers', () => {
+    expect(edgeLabelLines('上游\r\n下游')).toEqual(['上游', '下游'])
+    expect(edgeLabelSize('上游\n下游').height).toBe(44)
+  })
   it('routes an elbow around a blocking card', () => {
     const start = { x: 0, y: 50 }, end = { x: 300, y: 50 }, obstacle = { x: 120, y: 0, width: 60, height: 100 }
     const points = [start, ...orthogonalControlPoints(start, end, [obstacle]), end]

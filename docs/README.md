@@ -18,6 +18,7 @@
 ## 开发者与维护者
 
 - [开发与架构](DEVELOPMENT.md)
+- [分层观察与应对实施计划](LAYERED_OBSERVATION_IMPLEMENTATION_PLAN.md)：逐步开发、测试门禁和持续进度台账。
 - [Kernel / TuGo Package / Platform 架构](architecture/README.md)：现行拆分方案、数据兼容门禁与已归档讨论稿。
 - [打包手册](../release-docs/PACKAGING.md)
 - [发布清单](RELEASING.md)

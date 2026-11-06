@@ -27,6 +27,21 @@ const fixture = async () => {
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 describe('RuntimeRepository', () => {
+  it('does not promote unknown vision through save/probe, preserves declarations and invalidates them on identity change',async()=>{
+    const {root,defaults}=await fixture();const r=new RuntimeRepository(root,defaults);await r.open()
+    const first=r.saveModel({name:'unknown',provider_id:'openai',model:'text-test',extra_config:{custom_option:'keep'}})
+    const id=String(first.model_id)
+    expect((first.extra_config as Record<string,unknown>).vision_capable).toBeUndefined()
+    r.recordModelProbe(id,true,'text request works')
+    expect((r.listModels()[0].extra_config as Record<string,unknown>).vision_capable).toBeUndefined()
+    r.saveModel({name:'declared',provider_id:'openai',model:'text-test',extra_config:{vision_capable:true}},id)
+    const saved=r.saveModel({name:'renamed',provider_id:'openai',model:'text-test',extra_config:{custom_option:'keep'}},id)
+    expect(saved.extra_config).toMatchObject({vision_capable:true,custom_option:'keep'})
+    const changed=r.saveModel({name:'new-model',provider_id:'openai',model:'new-identity'},id)
+    expect((changed.extra_config as Record<string,unknown>).vision_capable).toBeUndefined()
+    expect(()=>r.saveModel({provider_id:'openai',model:'new-identity',extra_config:{vision_capable:'true'}},id)).toThrow('图片能力')
+    await r.close()
+  })
   it('rejects an impossible context and output capability configuration', async () => {
     const { root, defaults } = await fixture(); const repository = new RuntimeRepository(root, defaults); await repository.open()
     expect(() => repository.saveModel({ name: 'bad', provider_id: 'openai', model: 'bad', extra_config: { context_window: 4096, max_output_tokens: 4096 } })).toThrow('小于 Context Window')
@@ -111,6 +126,23 @@ describe('RuntimeRepository', () => {
     const reopened = new RuntimeRepository(root, defaults); await reopened.open()
     expect(reopened.schemaVersions().map(item => item.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
     await reopened.close()
+  })
+
+  it('upgrades the shipped per-tool frequency budget and preserves a custom budget', async () => {
+    const budgetAfterSeed = async (loopDetection: Record<string, unknown>) => {
+      const { root, defaults } = await fixture()
+      const base = JSON.parse(await readFile(defaults, 'utf8')) as Record<string, unknown>
+      const template = (base.agent || {}) as Record<string, unknown>
+      const middleware = (template.middleware || {}) as Record<string, unknown>
+      await writeFile(defaults, JSON.stringify({ ...base, agent: { ...template, middleware: { ...middleware, loopDetection } } }))
+      const repository = new RuntimeRepository(root, defaults); await repository.open()
+      const seeded = repository.listAgents().find(item => item.name === 'tugo-architect')
+      const bound = repository.getAgent(String(seeded?.agent_id))?.middleware as Record<string, unknown>
+      await repository.close()
+      return bound.loopDetection as Record<string, unknown>
+    }
+    expect(await budgetAfterSeed({ frequencyWarnAfter: 20, frequencyStopAfter: 30 })).toMatchObject({ frequencyWarnAfter: 60, frequencyStopAfter: 200 })
+    expect(await budgetAfterSeed({ frequencyWarnAfter: 45, frequencyStopAfter: 50 })).toMatchObject({ frequencyWarnAfter: 45, frequencyStopAfter: 50 })
   })
 
   it('upgrades legacy Skills into canonical packages and refuses malformed packages at load time', async () => {
@@ -391,6 +423,7 @@ describe('RuntimeRepository', () => {
     repository.finishRun('run-trace', 'failed', { message: 'fixture failure', category: 'authentication' })
     const trace = repository.runTrace(thread.thread_id, 'run-trace')
     expect(trace.failure).toMatchObject({ phase: 'model', category: 'authentication', message: 'fixture failure' })
+    expect(trace.failure?.status).toBeUndefined()
     expect(JSON.stringify(trace)).not.toContain('secret-value')
     expect(JSON.stringify(repository.listDebug(thread.thread_id))).not.toContain('must-not-persist')
     const retained = await repository.cleanupRetention({ maxEvents: 3, maxJournal: 3, maxDebug: 3 })
@@ -533,6 +566,22 @@ describe('RuntimeRepository', () => {
     await repository.close()
   })
 
+  it('compresses an oversized image before materializing it for a model call', async () => {
+    const { root, defaults } = await fixture(); const repository = new RuntimeRepository(root, defaults); await repository.open()
+    const { createCanvas } = await import('@napi-rs/canvas')
+    const canvas = createCanvas(2000, 1300); const context = canvas.getContext('2d')
+    const imageData = context.createImageData(2000, 1300)
+    for (let index = 0; index < imageData.data.length; index += 1) imageData.data[index] = Math.floor(Math.random() * 256)
+    context.putImageData(imageData, 0, 0)
+    const image = join(root, 'oversized.png'); await writeFile(image, canvas.toBuffer('image/png'))
+    const imported = await repository.importAttachment(image)
+    const attachments = await repository.modelAttachments([imported.attachment_id])
+    expect(attachments).toHaveLength(1)
+    expect(attachments[0].mimeType).toBe('image/jpeg')
+    expect(Buffer.from(attachments[0].dataBase64, 'base64').byteLength).toBeLessThanOrEqual(768 * 1024)
+    await repository.close()
+  })
+
   it('extracts text and PDF content, binds references and rejects binary text', async () => {
     const { root, defaults } = await fixture(); const repository = new RuntimeRepository(root, defaults); await repository.open()
     const textPath = join(root, 'notes.md'); await writeFile(textPath, '\ufeffTuGo 文本附件')
@@ -569,4 +618,18 @@ describe('RuntimeRepository', () => {
     expect(repository.readAttachmentText(importedXlsx.attachment_id).content).toContain('服务 | 数据库')
     await repository.close()
   })
+  it('preserves custom model, MCP binding, Skill and Prompt together across reopen',async()=>{
+    const {root,defaults}=await fixture();const first=new RuntimeRepository(root,defaults);await first.open()
+    const agent=first.listAgents()[0],agentId=String(agent.agent_id)
+    first.saveModel({name:'custom-model',provider_id:'openai',model:'user-choice',extra_config:{vision_capable:false,context_window:65536,custom_option:'keep'}})
+    first.saveSkill('tugo-architect','user skill','custom','custom')
+    first.savePromptTemplate('runtime.system','user prompt','custom')
+    const mcp=first.saveMcp({name:'custom-mcp',transport:'http',url:'https://fixture.invalid/mcp',headers:{Authorization:'secret://fixture'}})
+    first.bindAgentMcp(agentId,[{connection_id:String(mcp.connection_id),allowlist:['echo']}])
+    const before={models:first.listModels(),mcp:first.mcpForAgent(agentId),skill:first.skillContent('tugo-architect'),prompts:first.promptSnapshot()}
+    await first.close();const second=new RuntimeRepository(root,defaults);await second.open()
+    expect({models:second.listModels(),mcp:second.mcpForAgent(agentId),skill:second.skillContent('tugo-architect'),prompts:second.promptSnapshot()}).toEqual(before)
+    await second.close()
+  })
+
 })
