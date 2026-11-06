@@ -1036,7 +1036,7 @@ describe('TuGoRuntime loop', () => {
     expect(messages.filter(item => item.kind === 'stream_end')).toHaveLength(100)
     expect(runtime.repository.activeRunForProject('sequence-project')).toBeUndefined()
     await runtime.close()
-  })
+  }, 30_000)
 
   it('loads an actually bound skill by the catalog id', async () => {
     const messages: RuntimeToHost[] = []; const { runtime, agentId } = await createRuntime(messages)

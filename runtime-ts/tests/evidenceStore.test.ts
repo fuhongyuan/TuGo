@@ -127,7 +127,9 @@ describe('persistent platform evidence adapter',()=>{
   for(let offset=0;offset<rows.length;offset+=100){const v=await readEvidenceView(reopened,ref,r.scope,{path:['rows'],offset,limit:100});restored.push(...v.page.items);expect(v.evidenceRef).toBe(ref)}
   expect(restored).toEqual(rows)
   await expect(readEvidenceView(reopened,ref,{...r.scope,workspaceId:'other'},{path:['rows']})).rejects.toMatchObject({code:'forbidden'})
-  expect((await stat(join(root,(await readdir(root)).find(n=>n.endsWith('.json'))!))).mode&0o777).toBe(0o600)
+  // Windows uses inherited ACLs, not POSIX group/other permission bits.
+  // The scope-denial and restored-page assertions above apply on both OSes.
+  if(process.platform!=='win32')expect((await stat(join(root,(await readdir(root)).find(n=>n.endsWith('.json'))!))).mode&0o777).toBe(0o600)
  })
  it('does not discard confirmed business effects when storage fails',async()=>{
   const {root}=await fixture();const path=join(root,'not-a-directory');await writeFile(path,'occupied')
