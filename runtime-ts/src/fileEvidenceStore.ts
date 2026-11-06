@@ -38,6 +38,10 @@ export class FileEvidenceStore implements EvidencePort {
   return JSON.stringify(value)
  }
  private async syncDirectory() {
+  // Node cannot open/fsync directory handles on Windows. File contents are
+  // still flushed before exclusive publication; directory-entry power-loss
+  // durability on Windows remains a filesystem guarantee, not ours.
+  if(process.platform==='win32')return
   const handle=await open(this.directory,'r')
   try{await handle.sync()}finally{await handle.close()}
  }
@@ -70,7 +74,7 @@ export class FileEvidenceStore implements EvidencePort {
     const temporary=join(this.directory,'.pending-'+randomUUID())
     try {
      await writeFile(temporary,serialized,{flag:'wx',mode:0o600})
-     const h=await open(temporary,'r');try{await h.sync()}finally{await h.close()}
+     const h=await open(temporary,'r+');try{await h.sync()}finally{await h.close()}
      assertHeld()
      await link(temporary,this.path(ref)) // exclusive immutable publish; no overwrite
      await this.syncDirectory()
