@@ -52,7 +52,7 @@
     "pdfjs-dist": "^6.5.438",
     "proper-lockfile": "4.1.2",
     "sql.js": "^1.13.0",
-    "undici": "^7.29.0"
+    "undici": "^8.12.4"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
